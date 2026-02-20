@@ -8,6 +8,41 @@
       "when": 1769392103563,
       "tag": "0000_dry_mandarin",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1769705895027,
+      "tag": "0001_kind_xorn",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1769706250016,
+      "tag": "0002_dashing_william_stryker",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1769848182839,
+      "tag": "0003_absurd_sunfire",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1769848291967,
+      "tag": "0004_green_maelstrom",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1769857211434,
+      "tag": "0005_woozy_captain_stacy",
+      "breakpoints": true
     }
   ]
 }

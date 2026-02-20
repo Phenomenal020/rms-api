@@ -1,5 +1,7 @@
-import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, boolean, index, pgEnum, integer, unique } from "drizzle-orm/pg-core";
+// This file defines the database schema wiith pgTable() functions.
+
+import { relations, sql } from "drizzle-orm";
+import { pgTable, text, timestamp, boolean, index, pgEnum, integer, unique, check } from "drizzle-orm/pg-core";
 
 // Enums
 // Gender for students
@@ -20,7 +22,7 @@ export const departmentEnum = pgEnum("department", ["NONE", "SCIENCE", "ARTS", "
 // A school is the top-level organisational unit
 export const school = pgTable("school", {
   // identifier
-  id: text("id").primaryKey(),
+  id: text("id").primaryKey().default(sql`gen_random_uuid()`),
   // school information
   schoolName: text("school_name").notNull(),
   schoolAddress: text("school_address"),
@@ -35,11 +37,12 @@ export const school = pgTable("school", {
     .notNull(),
 });
 
+// A user === a teacher
 export const user = pgTable(
   "user",
   {
     // identifier
-    id: text("id").primaryKey(),
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
     // user information
     name: text("name").notNull(),
     firstName: text("first_name").notNull(),
@@ -49,9 +52,11 @@ export const user = pgTable(
     image: text("image"),
     role: roleEnum("role").default("TEACHER").notNull(),
     subscription: subscriptionEnum("subscription").default("REGULAR").notNull(),
-    // school affiliation
+    // school affiliation (one user record has one school using schoolId)
     schoolId: text("school_id").references(() => school.id, { onDelete: "cascade" }),
+    // academic term affiliation (one user record to one academic term using academicTermId)
     academicTermId: text("academic_term_id").references(() => academicTerm.id, { onDelete: "set null" }),
+    // date management
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()
@@ -59,6 +64,14 @@ export const user = pgTable(
       .notNull(),
   },
   (table) => [
+    // Justification (school has >100 users, )
+    // Possible patterns: 1) Get all users for a school 
+    // 2) Filter users by school
+    // 3) Check if user has a school
+    // 4) Get all users for an academic term (maybe all teachers for that term)
+
+    // Use Case (Todo: School Admin wants to view all teachers for their school)
+    // Todo: School Admin wants to view all teachers for a specific academic term
     index("user_schoolId_idx").on(table.schoolId),
     index("user_academicTermId_idx").on(table.academicTermId),
   ],
@@ -127,11 +140,15 @@ export const verification = pgTable(
 export const classTable = pgTable(
   "class",
   {
-    id: text("id").primaryKey(),
+    // identifier
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // class information
     name: text("name").notNull(),
+    // school affiliation (one class record has one school using schoolId)
     schoolId: text("school_id")
       .notNull()
       .references(() => school.id, { onDelete: "cascade" }),
+    // date management
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()
@@ -139,7 +156,12 @@ export const classTable = pgTable(
       .notNull(),
   },
   (table) => [
+    // Justification (class name must be unique within a school eg, no two JSS1Bs)
     unique("class_schoolId_name_key").on(table.schoolId, table.name),
+    //  Index for querying classes by school
+    // Case study: 1) Get all classes for a school
+    // 2) Filter classes by school
+    // 3) Count classes for a school
     index("class_schoolId_idx").on(table.schoolId),
   ],
 );
@@ -148,22 +170,29 @@ export const classTable = pgTable(
 export const academicTerm = pgTable(
   "academic_term",
   {
-    id: text("id").primaryKey(),
+    // identifier
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // academic term information
     academicYear: text("academic_year").notNull(),
     term: termEnum("term").notNull(),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    classId: text("class_id")
-      .notNull()
-      .references(() => classTable.id, { onDelete: "cascade" }),
-    schoolId: text("school_id")
-      .notNull()
-      .references(() => school.id, { onDelete: "cascade" }),
     termDays: integer("term_days"),
     termStart: timestamp("term_start"),
     termEnd: timestamp("term_end"),
-    resultTemplateUrl: text("result_template_url"),
+    // term information
+    resultTemplateUrl: text("result_template_url"), // for pro users
+    // user affiliation (one to one using userId)
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    // class affiliation (one to one using classId)
+    classId: text("class_id")
+      .notNull()
+      .references(() => classTable.id, { onDelete: "cascade" }),
+    // school affiliation (one to one using schoolId)
+    schoolId: text("school_id")
+      .notNull()
+      .references(() => school.id, { onDelete: "cascade" }),
+    // date management
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()
@@ -171,7 +200,12 @@ export const academicTerm = pgTable(
       .notNull(),
   },
   (table) => [
+    // Justification: One term per class per year 
     unique("academic_term_classId_academicYear_term_key").on(table.classId, table.academicYear, table.term),
+    //  Index for querying academic terms by user, class, school
+    // Justifications: Frequently accessed columns
+    // - userId: Get all academic terms for a user
+    // - schoolId: Get all academic terms for a school
     index("academic_term_userId_idx").on(table.userId),
     index("academic_term_classId_idx").on(table.classId),
     index("academic_term_schoolId_idx").on(table.schoolId),
@@ -179,43 +213,63 @@ export const academicTerm = pgTable(
 );
 
 // Grading rules are term-specific
-export const gradingSystem = pgTable(
-  "grading_system",
+export const gradingEntry = pgTable(
+  "grading_entry",
   {
-    id: text("id").primaryKey(),
+    // identifier
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // grading entry information
     grade: text("grade").notNull(),
     minScore: integer("min_score").notNull(),
     maxScore: integer("max_score").notNull(),
     remark: text("remark"),
+    // academic term affiliation (one grading entry to one academic term using academicTermId)
     academicTermId: text("academic_term_id")
       .notNull()
       .references(() => academicTerm.id, { onDelete: "cascade" }),
+    // date management
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
-  (table) => [index("grading_system_academicTermId_idx").on(table.academicTermId)],
+  (table) => [
+    // Justification: Get grading entry for an academic term
+    index("grading_entry_academicTermId_idx").on(table.academicTermId),
+    // Justification: Each grade (A, B, C, etc.) should be unique per academic term
+    // Prevents duplicate grades like having two "A" entries for the same term
+    unique("grading_entry_academicTermId_grade_key").on(table.academicTermId, table.grade),
+    // Justification: Ensure minScore is less than or equal to maxScore
+    // Prevents invalid score ranges like minScore=80, maxScore=70
+    check("grading_entry_min_max_score_check", sql`min_score <= max_score`),
+    // Justification: Ensure scores are within valid range (0-100)
+    check("grading_entry_score_range_check", sql`min_score >= 0 AND max_score <= 100`),
+  ],
 );
 
-// Defines how assessments are structured for a term (e.g., CA = 30%, Exam = 70%)
+// Defines how assessments are structured for a term (e.g., CA = 30%, Exam = 70%). It is a resuable entity
 export const assessmentStructure = pgTable(
   "assessment_structure",
   {
-    id: text("id").primaryKey(),
-    type: text("type").notNull(),
-    percentage: integer("percentage").notNull(),
-    order: integer("order").notNull(),
+    // identifier
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // assessment structure information
+    type: text("type").notNull(), // e.g., CA, Exam
+    percentage: integer("percentage").notNull(), // e.g., 30
+    order: integer("order").notNull(), // e.g., 1
+    // academic term affiliation (one assessment structure to one academic term using academicTermId)
     academicTermId: text("academic_term_id")
       .notNull()
       .references(() => academicTerm.id, { onDelete: "cascade" }),
+    // date management
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
+  // Justification: Get assessment structure for an academic term
   (table) => [index("assessment_structure_academicTermId_idx").on(table.academicTermId)],
 );
 
@@ -223,11 +277,15 @@ export const assessmentStructure = pgTable(
 export const subject = pgTable(
   "subject",
   {
-    id: text("id").primaryKey(),
+    // identifier
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // subject information
     name: text("name").notNull(),
+    // academic term affiliation (one subject is mapped to one academic term using academicTermId)
     academicTermId: text("academic_term_id")
       .notNull()
       .references(() => academicTerm.id, { onDelete: "cascade" }),
+    // assessment structure affiliation (one subject is mapped to one assessment structure using assessmentStructureId). Ie, each subject does not have its own assessment structure.
     assessmentStructureId: text("assessment_structure_id").references(() => assessmentStructure.id, {
       onDelete: "set null",
     }),
@@ -247,7 +305,9 @@ export const subject = pgTable(
 export const student = pgTable(
   "student",
   {
-    id: text("id").primaryKey(),
+    // identifier
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // student information
     firstName: text("first_name").notNull(),
     middleName: text("middle_name"),
     lastName: text("last_name").notNull(),
@@ -255,15 +315,18 @@ export const student = pgTable(
     gender: genderEnum("gender").default("NONE").notNull(),
     department: departmentEnum("department").default("NONE").notNull(),
     daysPresent: integer("days_present"),
+    // academic term affiliation (one student record is scoped to one academic term using academicTermId)
     academicTermId: text("academic_term_id")
       .notNull()
       .references(() => academicTerm.id, { onDelete: "cascade" }),
+    // date management
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
+  // Justification: Get students for an academic term
   (table) => [index("student_academicTermId_idx").on(table.academicTermId)],
 );
 
@@ -271,13 +334,15 @@ export const student = pgTable(
 export const studentSubject = pgTable(
   "student_subject",
   {
-    id: text("id").primaryKey(),
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // if a student is deleted, prevent deletion if enrollments exist.
     studentId: text("student_id")
       .notNull()
-      .references(() => student.id, { onDelete: "cascade" }),
+      .references(() => student.id, { onDelete: "restrict" }),
+    // if a subject is deleted (hard delete), prevent deletion if enrollments exist
     subjectId: text("subject_id")
       .notNull()
-      .references(() => subject.id, { onDelete: "cascade" }),
+      .references(() => subject.id, { onDelete: "restrict" }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()
@@ -295,16 +360,20 @@ export const studentSubject = pgTable(
 export const assessment = pgTable(
   "assessment",
   {
-    id: text("id").primaryKey(),
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // if a student is deleted,their assessments should not be removed (restrict)
     studentId: text("student_id")
       .notNull()
-      .references(() => student.id, { onDelete: "cascade" }),
+      .references(() => student.id, { onDelete: "restrict" }),
+    // if a subject is deleted (hard delete), prevent deletion if assessments exist
     subjectId: text("subject_id")
       .notNull()
-      .references(() => subject.id, { onDelete: "cascade" }),
+      .references(() => subject.id, { onDelete: "restrict" }),
+    // if a student enrollment in a subject is deleted, prevent deletion if assessments exist (restrict)
+    // This prevents data loss - assessments must be deleted manually or student must be removed from assessments first
     studentSubjectId: text("student_subject_id")
       .notNull()
-      .references(() => studentSubject.id, { onDelete: "cascade" }),
+      .references(() => studentSubject.id, { onDelete: "restrict" }),
     academicTermId: text("academic_term_id")
       .notNull()
       .references(() => academicTerm.id, { onDelete: "cascade" }),
@@ -332,7 +401,8 @@ export const assessment = pgTable(
 export const assessmentScore = pgTable(
   "assessment_score",
   {
-    id: text("id").primaryKey(),
+    id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+    // if an assessment is deleted, delete the scores as well.
     assessmentId: text("assessment_id")
       .notNull()
       .references(() => assessment.id, { onDelete: "cascade" }),
@@ -356,81 +426,86 @@ export const assessmentScore = pgTable(
   ],
 );
 
-// Relations
+// Summary: A School has many users, classes, academic terms
 export const schoolRelations = relations(school, ({ many }) => ({
-  users: many(user),
-  classes: many(classTable),
-  academicTerms: many(academicTerm),
+  users: many(user), // school.users → get all users for a school
+  classes: many(classTable), // school.classes → get all classes for a school
+  academicTerms: many(academicTerm), // school.academicTerms → get all academic terms for a school
 }));
 
+// Summary: A User has one school, one academic term, many sessions, many accounts
 export const userRelations = relations(user, ({ one, many }) => ({
   school: one(school, {
     fields: [user.schoolId],
     references: [school.id],
-  }),
+  }), // user.school → get the school for a user
   academicTerm: one(academicTerm, {
     fields: [user.academicTermId],
     references: [academicTerm.id],
-  }),
-  sessions: many(session),
-  accounts: many(account),
+  }), // user.academicTerm → get the academic term for a user
+  sessions: many(session), // user.sessions → get all sessions for a user
+  accounts: many(account), // user.accounts → get all accounts for a user
 }));
 
+// Summary: A Class has one school and can exist across many academic terms
 export const classRelations = relations(classTable, ({ one, many }) => ({
   school: one(school, {
     fields: [classTable.schoolId],
     references: [school.id],
-  }),
-  academicTerms: many(academicTerm),
+  }), // class.school → get the school for a class
+  academicTerms: many(academicTerm), // class.academicTerms → get all academic terms for a class
 }));
 
+// Summary: An Academic term record is scoped to one user, one class, one school, many grading entries, many assessment structures, many subjects, many students, many assessments
 export const academicTermRelations = relations(academicTerm, ({ one, many }) => ({
   user: one(user, {
     fields: [academicTerm.userId],
     references: [user.id],
-  }),
+  }), // academicTerm.user → get the user for an academic term
   class: one(classTable, {
     fields: [academicTerm.classId],
     references: [classTable.id],
-  }),
+  }), // academicTerm.class → get the class for an academic term
   school: one(school, {
     fields: [academicTerm.schoolId],
     references: [school.id],
-  }),
-  gradingSystem: many(gradingSystem),
-  assessmentStructure: many(assessmentStructure),
-  subjects: many(subject),
-  students: many(student),
-  assessments: many(assessment),
+  }), // academicTerm.school → get the school for an academic term
+  gradingEntry: many(gradingEntry), // academicTerm.gradingEntry → get all grading entries for an academic term
+  assessmentStructure: many(assessmentStructure), // academicTerm.assessmentStructure → get all assessment structures for an academic term
+  subjects: many(subject), // academicTerm.subjects → get all subjects for an academic term
+  students: many(student), // academicTerm.students → get all students for an academic term
+  assessments: many(assessment), // academicTerm.assessments → get all assessments for an academic term
 }));
 
-export const gradingSystemRelations = relations(gradingSystem, ({ one }) => ({
+// Summary: A Grading entry in one academic term. Multiple grading entries can exist for an academic term.
+export const gradingEntryRelations = relations(gradingEntry, ({ one }) => ({
   academicTerm: one(academicTerm, {
-    fields: [gradingSystem.academicTermId],
+    fields: [gradingEntry.academicTermId],
     references: [academicTerm.id],
-  }),
+  }), // gradingEntry.academicTerm → get the academic term for a grading entry
 }));
 
+// Summary: Assessment structure has one academic term, many subjects, many scores. It is a resuable entity.
 export const assessmentStructureRelations = relations(assessmentStructure, ({ one, many }) => ({
   academicTerm: one(academicTerm, {
     fields: [assessmentStructure.academicTermId],
     references: [academicTerm.id],
-  }),
-  subjects: many(subject),
-  scores: many(assessmentScore),
+  }), // assessmentStructure.academicTerm → get the academic term for an assessment structure
+  subjects: many(subject), // assessmentStructure.subjects → get all subjects for an assessment structure
+  scores: many(assessmentScore), // assessmentStructure.scores → get all scores for an assessment structure
 }));
 
 export const subjectRelations = relations(subject, ({ one, many }) => ({
   academicTerm: one(academicTerm, {
     fields: [subject.academicTermId],
     references: [academicTerm.id],
-  }),
+  }), // subject.academicTerm → get the academic term for a subject
   assessmentStructure: one(assessmentStructure, {
     fields: [subject.assessmentStructureId],
     references: [assessmentStructure.id],
-  }),
-  students: many(studentSubject),
-  assessments: many(assessment),
+  }), // subject.assessmentStructure → get the assessment structure for a subject
+  students: many(studentSubject), // subject.students → get all students for a subject
+  assessments: many(assessment), // subject.assessments → get all assessments for a subject
 }));
 
 export const studentRelations = relations(student, ({ one, many }) => ({

@@ -1,151 +1,133 @@
-/**
- * Validation functions for term actions
- */
+import { UpsertTermDto } from "./dto/upsert-term.dto";
 
-/**
- * Parse optional dates. Returns undefined if the value is not a date.
- */
-function parseOptionalDate(value: any): Date | null | undefined {
-  if (value === undefined || value === null) return undefined;
-  const date = value instanceof Date ? value : new Date(value);
-  if (isNaN(date.getTime())) return null; // invalid
-  return date;
+// Interface for grade
+export interface Grade {
+  minScore: number;
+  maxScore: number;
+  grade: string;
+  index?: number;
 }
 
-/**
- * Parse optional numbers. Returns undefined if the value is not a number.
- */
-function parseOptionalNumber(value: any): number | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  const num = typeof value === 'number' ? value : Number(value);
-  return Number.isNaN(num) ? undefined : num;
+// Interface for grading entry
+export interface GradingEntry extends Grade {
+  remark?: string | null;
 }
 
+// Interface for validated term data
 export interface ValidatedTermData {
   academicYear: string;
   term: 'FIRST' | 'SECOND' | 'THIRD';
   className: string;
-  termDays?: number;
-  termStart?: Date | null;
-  termEnd?: Date | null;
-  gradingSystem?: Array<{
-    grade: string;
-    minScore: number;
-    maxScore: number;
-    remark?: string | null;
-  }>;
+  termDays?: number | null | undefined;
+  termStart?: Date | null | undefined;
+  termEnd?: Date | null | undefined;
+  gradingEntry: Array<GradingEntry>;
 }
 
+// Interface for validation result
 export interface ValidationResult {
   isValid: boolean;
   error?: string;
   validated?: ValidatedTermData;
 }
 
-/**
- * Validates term update/create data
- */
-export function validateTermUpdate(termData: any): ValidationResult {
+// Parse optional date field (string → Date, keep null/undefined as-is)
+function parseOptionalDate(value: string | null | undefined): Date | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const date = new Date(value);
+  if (isNaN(date.getTime())) return null; // invalid date string
+  return date;
+}
+
+// Validates term data — only business rules that class-validator decorators can't express.
+// Basic shape/type checks (required fields, types, enums, array length, nested structure)
+// are already handled by the DTO decorators + ValidationPipe before this function is called.
+export function validateTermUpdate(termData: UpsertTermDto): ValidationResult {
   const errors: string[] = [];
 
-  // Validate required fields
-  if (!termData.academicYear || typeof termData.academicYear !== 'string' || termData.academicYear.trim() === '') {
-    return { isValid: false, error: 'Academic year is required' };
-  }
-
-  if (!termData.className || typeof termData.className !== 'string' || termData.className.trim() === '') {
-    return { isValid: false, error: 'Class name is required' };
-  }
-
-  // Validate term (enum)
-  if (!['FIRST', 'SECOND', 'THIRD'].includes(termData.term)) {
-    return { isValid: false, error: 'Term must be First, Second, or Third' };
-  }
-
-  // Validate term days
-  const termDaysNum = parseOptionalNumber(termData.termDays);
-  if (termDaysNum !== undefined && (termDaysNum < 0 || !Number.isInteger(termDaysNum))) {
-    return { isValid: false, error: 'Term days must be a valid non-negative integer' };
-  }
-
-  // Validate term start and end dates
+  // Cross-field: termEnd must be after termStart
   const termStartDate = parseOptionalDate(termData.termStart);
   const termEndDate = parseOptionalDate(termData.termEnd);
   if (termStartDate && termEndDate && termEndDate <= termStartDate) {
     return { isValid: false, error: 'Term end date must be after term start date' };
   }
 
-  // Grading system validation
-  let gradingSystem = termData.gradingSystem;
-  if (gradingSystem !== undefined) {
-    // Validate grading system is an array
-    if (!Array.isArray(gradingSystem)) {
-      return { isValid: false, error: 'Grading system entries must be at least one' };
-    } else {
-      const scoreRanges: Array<{ min: number; max: number; index: number }> = [];
-      gradingSystem.forEach((entry, i) => {
-        if (!entry || typeof entry !== 'object') {
-          errors.push(`Grading system entry ${i + 1} is invalid`);
-          return;
-        }
-        // Validate grade is provided
-        const grade = entry.grade?.trim();
-        if (!grade) {
-          errors.push(`Grading system entry ${i + 1}: Grade is required`);
-        }
+  // Grading entry business rules
+  const { gradingEntry } = termData;
+  const scoreRanges: Array<Grade> = [];
+  const seenGrades = new Set<string>();
 
-        // Validate minScore and maxScore are provided and are numbers and within the range of 0 to 100
-        const minScore = parseOptionalNumber(entry.minScore);
-        const maxScore = parseOptionalNumber(entry.maxScore);
-        if (
-          minScore === undefined ||
-          maxScore === undefined ||
-          minScore < 0 ||
-          maxScore > 100 ||
-          minScore >= maxScore
-        ) {
-          errors.push(`Grading system entry ${i + 1}: Invalid score range`);
-        } else {
-          scoreRanges.push({ min: minScore, max: maxScore, index: i + 1 });
-        }
-      });
+  for (let i = 0; i < gradingEntry.length; i++) {
+    const entry = gradingEntry[i];
 
-      // Check for overlapping ranges
-      for (let i = 0; i < scoreRanges.length; i++) {
-        for (let j = i + 1; j < scoreRanges.length; j++) {
-          const r1 = scoreRanges[i];
-          const r2 = scoreRanges[j];
-          if (r1.min <= r2.max && r1.max >= r2.min) {
-            errors.push(`Grading system entries ${r1.index} and ${r2.index} overlap`);
-          }
-        }
+    // Cross-field: duplicate grades (case-insensitive, matches DB unique constraint)
+    const gradeUpper = entry.grade.toUpperCase();
+    if (seenGrades.has(gradeUpper)) {
+      errors.push(`Grading entry ${i + 1}: Duplicate grade "${entry.grade}"`);
+      continue;
+    }
+    seenGrades.add(gradeUpper);
+
+    // Cross-field: minScore must be less than maxScore
+    if (entry.minScore >= entry.maxScore) {
+      errors.push(`Grading entry ${i + 1}: Invalid score range`);
+      continue;
+    }
+
+    scoreRanges.push({ grade: entry.grade, minScore: entry.minScore, maxScore: entry.maxScore, index: i + 1 });
+  }
+
+  // Ensure at least one valid grading entry exists after business validation
+  if (scoreRanges.length === 0) {
+    errors.push('At least one valid grading entry is required');
+  }
+
+  // Cross-entry: check for overlapping ranges
+  for (let i = 0; i < scoreRanges.length; i++) {
+    for (let j = i + 1; j < scoreRanges.length; j++) {
+      const r1 = scoreRanges[i];
+      const r2 = scoreRanges[j];
+      if (r1.minScore <= r2.maxScore && r1.maxScore >= r2.minScore) {
+        errors.push(`Grading entry ${r1.index} and ${r2.index} overlap`);
       }
     }
   }
 
-  // If there are any errors, return the first error
+  // Cross-entry: grade ranges must cover 0–100 with no gaps
+  if (scoreRanges.length > 0) {
+    const sortedRanges = [...scoreRanges].sort((a, b) => a.minScore - b.minScore);
+
+    let currentPos = -1;
+    for (const range of sortedRanges) {
+      if (range.minScore !== currentPos + 1) {
+        errors.push('Grade ranges must total exactly 100% (0-100) with no gaps');
+        break;
+      }
+      currentPos = range.maxScore;
+    }
+
+    if (currentPos !== 100) {
+      errors.push('Grade ranges must total exactly 100% (0-100) with no gaps');
+    }
+  }
+
+  // Return first error if any
   if (errors.length > 0) {
     return { isValid: false, error: errors[0] };
   }
 
-  // Return validated data
+  // Build validated data (DTO already trimmed strings via @Transform)
   return {
     isValid: true,
     validated: {
-      academicYear: termData.academicYear.trim(),
+      academicYear: termData.academicYear,
       term: termData.term,
-      className: termData.className.trim(),
-      termDays: termDaysNum,
-      termStart: termStartDate ?? undefined,
-      termEnd: termEndDate ?? undefined,
-      gradingSystem: gradingSystem
-        ? gradingSystem.map((entry: any) => ({
-            grade: entry.grade.trim(),
-            minScore: typeof entry.minScore === 'number' ? entry.minScore : Number(entry.minScore),
-            maxScore: typeof entry.maxScore === 'number' ? entry.maxScore : Number(entry.maxScore),
-            remark: entry.remark?.trim() || null,
-          }))
-        : undefined,
+      className: termData.className,
+      termDays: termData.termDays,
+      termStart: termStartDate,
+      termEnd: termEndDate,
+      gradingEntry: gradingEntry,
     },
   };
 }

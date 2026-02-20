@@ -3,58 +3,72 @@ import {
   UnauthorizedException,
   BadRequestException,
   NotFoundException,
+  InternalServerErrorException,
+  Inject,
 } from '@nestjs/common';
-import { Inject } from '@nestjs/common';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
 import {
   academicTerm,
   classTable,
-  gradingSystem,
-  user,
-  school,
+  gradingEntry,
+  user
 } from '../auth/schema';
 import { eq, and } from 'drizzle-orm';
-import { CreateTermDto } from './dto/create-term.dto';
-import { UpdateTermDto } from './dto/update-term.dto';
+import { UpsertTermDto } from './dto/upsert-term.dto';
 import { validateTermUpdate } from './term-validation';
+import * as schema from '../auth/schema';
+
+
+export interface UserWithSchoolAndAcademicTermId {
+  id: string;
+  schoolId: string;
+  academicTermId?: string | null;
+}
+
+// PAYLOAD DESIGN: Always send required fields. Optional fields are only sent if dirty. TODO: Consider making this more efficient in the future by sending only dirty fields. This design choice was made for safety, trading speed and bandwidth for safety.
 
 @Injectable()
 export class TermService {
   constructor(
     @Inject(DATABASE_CONNECTION)
-    private readonly db: NodePgDatabase,
-  ) {}
+    private readonly db: NodePgDatabase<typeof schema>,
+  ) { }
 
-  /**
-   * Helper: Get user and validate prerequisites
-   */
-  private async getUserWithSchool(userId: string) {
+  // Helper: Get user with school and academic term id
+  // Returns user's id, schoolId, and academicTermId (if exists)
+  // academicTermId is used to determine if we're updating an existing term or creating a new one
+  private async checkWhetherToUpdateOrCreateTerm(userId: string): Promise<UserWithSchoolAndAcademicTermId> {
     const currentUser = await this.db
       .select({
         id: user.id,
         schoolId: user.schoolId,
-        academicTermId: user.academicTermId,
+        academicTermId: user.academicTermId ?? null, // Needed to determine update vs create flow
       })
       .from(user)
       .where(eq(user.id, userId))
       .limit(1);
 
+    // drizzle returns an array with .select()
     if (!currentUser || currentUser.length === 0) {
       throw new UnauthorizedException('User unauthorised');
     }
 
+    // If the user does not have a school id, throw a bad request exception
     if (!currentUser[0].schoolId) {
       throw new BadRequestException('Please set up your school information first');
     }
 
-    return currentUser[0];
+    // Type assertion: schoolId is guaranteed to be non-null after validation above
+    return currentUser[0] as UserWithSchoolAndAcademicTermId;
   }
 
-  /**
-   * Helper: Find or create class
-   */
-  private async findOrCreateClass(tx: any, schoolId: string, className: string) {
+  // Helper: Find or create class
+  private async findOrCreateClass(tx: NodePgDatabase<typeof schema>, schoolId: string | null, className: string) {
+    if (!schoolId) {
+      throw new BadRequestException('No school record found. Please set up your school information first.');
+    }
+
     // Try to find existing class
     const existingClass = await tx
       .select()
@@ -62,15 +76,15 @@ export class TermService {
       .where(and(eq(classTable.schoolId, schoolId), eq(classTable.name, className)))
       .limit(1);
 
+    // If the class exists, return it
     if (existingClass && existingClass.length > 0) {
       return existingClass[0];
     }
 
-    // Create new class
+    // Otherwise, Create new class
     const [newClass] = await tx
       .insert(classTable)
       .values({
-        id: crypto.randomUUID(),
         name: className,
         schoolId: schoolId,
         createdAt: new Date(),
@@ -81,251 +95,108 @@ export class TermService {
     return newClass;
   }
 
-  /**
-   * 1. GET /term - Get current user's academic term
-   */
-  async getTerm(userId: string) {
-    const currentUser = await this.getUserWithSchool(userId);
-
-    if (!currentUser.academicTermId) {
-      return null;
-    }
-
-    const term = await this.db
-      .select()
-      .from(academicTerm)
-      .where(eq(academicTerm.id, currentUser.academicTermId))
-      .limit(1);
-
-    if (!term || term.length === 0) {
-      return null;
-    }
-
-    // Get class
-    const classEntity = await this.db
-      .select()
-      .from(classTable)
-      .where(eq(classTable.id, term[0].classId))
-      .limit(1);
-
-    // Get grading system
-    const gradingSystemData = await this.db
-      .select()
-      .from(gradingSystem)
-      .where(eq(gradingSystem.academicTermId, term[0].id));
-
-    return {
-      ...term[0],
-      className: classEntity[0]?.name || '',
-      gradingSystem: gradingSystemData,
-    };
-  }
-
-  /**
-   * 2. POST /term - Create academic term
-   */
-  async createTerm(userId: string, termData: CreateTermDto) {
+  // Upsert academic term (create or update)
+  async upsertTerm(userId: string, termData: UpsertTermDto) {
+    // Validate term data
     const validation = validateTermUpdate(termData);
+
+    // if there are errors, throw a bad request exception
     if (!validation.isValid || !validation.validated) {
-      throw new BadRequestException(validation.error);
+      throw new BadRequestException(validation.error || 'Invalid term data. Please check your input and try again.');
     }
 
+    // get the user and academic term id from the db to determine if we're updating an existing term or creating a new one
     const { validated } = validation;
-    const currentUser = await this.getUserWithSchool(userId);
+    const currentUser = await this.checkWhetherToUpdateOrCreateTerm(userId);
+    const userAcademicTermId = currentUser.academicTermId;
 
     try {
       return await this.db.transaction(async (tx) => {
-        // Find or create class
-        const classEntity = await this.findOrCreateClass(tx, currentUser.schoolId, validated.className);
-
-        // Check for unique constraint violation
-        const existingTerm = await tx
-          .select()
-          .from(academicTerm)
-          .where(
-            and(
-              eq(academicTerm.classId, classEntity.id),
-              eq(academicTerm.academicYear, validated.academicYear),
-              eq(academicTerm.term, validated.term),
-            ),
-          )
-          .limit(1);
-
-        if (existingTerm && existingTerm.length > 0) {
-          throw new BadRequestException('An academic term with this class, year, and term already exists');
-        }
-
-        // Create new academic term
-        const [newTerm] = await tx
-          .insert(academicTerm)
-          .values({
-            id: crypto.randomUUID(),
-            academicYear: validated.academicYear,
-            term: validated.term,
-            termDays: validated.termDays ?? null,
-            termStart: validated.termStart ?? null,
-            termEnd: validated.termEnd ?? null,
-            resultTemplateUrl: termData.resultTemplateUrl ?? null,
-            userId: userId,
-            schoolId: currentUser.schoolId,
-            classId: classEntity.id,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .returning();
-
-        // Link term to user
-        await tx
-          .update(user)
-          .set({ academicTermId: newTerm.id, updatedAt: new Date() })
-          .where(eq(user.id, userId));
-
-        // Create grading system if provided
-        if (validated.gradingSystem && validated.gradingSystem.length > 0) {
-          await tx.insert(gradingSystem).values(
-            validated.gradingSystem.map((entry) => ({
-              id: crypto.randomUUID(),
-              grade: entry.grade,
-              minScore: entry.minScore,
-              maxScore: entry.maxScore,
-              remark: entry.remark ?? null,
-              academicTermId: newTerm.id,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            })),
-          );
-        }
-
-        // Fetch created term with related data
-        const gradingSystemData = await tx
-          .select()
-          .from(gradingSystem)
-          .where(eq(gradingSystem.academicTermId, newTerm.id));
-
-        return {
-          ...newTerm,
-          className: classEntity.name,
-          gradingSystem: gradingSystemData,
-        };
-      });
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new BadRequestException('Failed to create term');
-    }
-  }
-
-  /**
-   * 3. PATCH /term - Update academic term
-   */
-  async updateTerm(userId: string, termData: UpdateTermDto) {
-    const validation = validateTermUpdate(termData);
-    if (!validation.isValid || !validation.validated) {
-      throw new BadRequestException(validation.error);
-    }
-
-    const { validated } = validation;
-    const currentUser = await this.getUserWithSchool(userId);
-
-    if (!currentUser.academicTermId) {
-      throw new NotFoundException('No academic term found. Please create one first.');
-    }
-
-    try {
-      return await this.db.transaction(async (tx) => {
-        // Get existing term
-        const existingTerm = await tx
-          .select()
-          .from(academicTerm)
-          .where(eq(academicTerm.id, currentUser.academicTermId))
-          .limit(1);
-
-        if (!existingTerm || existingTerm.length === 0) {
-          throw new NotFoundException('Academic term not found');
-        }
-
-        const term = existingTerm[0];
-
-        // Prepare update data
-        const termUpdateData: any = {
-          updatedAt: new Date(),
-        };
-
-        // Required fields (always update if provided)
-        if (validated.academicYear) {
-          termUpdateData.academicYear = validated.academicYear;
-        }
-        if (validated.term) {
-          termUpdateData.term = validated.term;
-        }
-
-        // Optional fields (only update if provided)
-        if (termData.termDays !== undefined) {
-          termUpdateData.termDays = validated.termDays ?? null;
-        }
-        if (termData.termStart !== undefined) {
-          termUpdateData.termStart = validated.termStart ?? null;
-        }
-        if (termData.termEnd !== undefined) {
-          termUpdateData.termEnd = validated.termEnd ?? null;
-        }
-        if (termData.resultTemplateUrl !== undefined) {
-          termUpdateData.resultTemplateUrl = termData.resultTemplateUrl ?? null;
-        }
-
-        // Handle class name change
-        let updatedClassId = term.classId;
-        if (validated.className) {
-          const classEntity = await tx
-            .select()
-            .from(classTable)
-            .where(eq(classTable.id, term.classId))
-            .limit(1);
-
-          if (!classEntity || classEntity.length === 0 || classEntity[0].name !== validated.className) {
-            const newClass = await this.findOrCreateClass(tx, currentUser.schoolId, validated.className);
-            updatedClassId = newClass.id;
-            termUpdateData.classId = updatedClassId;
-          }
-        }
-
-        // Check for unique constraint violation if academicYear, term, or class changed
-        if (
-          (validated.academicYear && validated.academicYear !== term.academicYear) ||
-          (validated.term && validated.term !== term.term) ||
-          updatedClassId !== term.classId
-        ) {
-          const conflictingTerm = await tx
+        // If the user has an academic term id, then we're updating an existing term
+        if (userAcademicTermId) {
+          const existingTerm = await tx
             .select()
             .from(academicTerm)
-            .where(
-              and(
-                eq(academicTerm.classId, updatedClassId),
-                eq(academicTerm.academicYear, validated.academicYear || term.academicYear),
-                eq(academicTerm.term, validated.term || term.term),
-              ),
-            )
-            .limit(1);
+            .where(eq(academicTerm.id, userAcademicTermId))
+            .limit(1);  // use that academic term id to find the term
 
-          if (conflictingTerm && conflictingTerm.length > 0 && conflictingTerm[0].id !== term.id) {
-            throw new BadRequestException('An academic term with this class, year, and term already exists');
+          if (!existingTerm || existingTerm.length === 0) {
+            throw new NotFoundException('Academic term not found. Please create a new term first');
+          }  // Extra check
+
+          const term = existingTerm[0];
+
+          // Prepare update data
+          const termUpdateData: Partial<typeof academicTerm.$inferInsert> = {
+            academicYear: validated.academicYear,
+            term: validated.term,
+            updatedAt: new Date(),
+          };
+
+          // Optional fields (only update if provided). Else, they're undefined so skip.
+          if (termData.termDays !== undefined) {
+            termUpdateData.termDays = validated.termDays ?? null;
           }
-        }
+          if (termData.termStart !== undefined) {
+            termUpdateData.termStart = validated.termStart ?? null;
+          }
+          if (termData.termEnd !== undefined) {
+            termUpdateData.termEnd = validated.termEnd ?? null;
+          }
+          termUpdateData.resultTemplateUrl = null  // TODO: Add/Remove this. Make up my mind later.
 
-        // Update academic term
-        await tx.update(academicTerm).set(termUpdateData).where(eq(academicTerm.id, term.id));
+          // Handle class name change
+          let updatedClassId = term.classId;
+          if (validated.className) {
+            // Check if the class exists
+            const classEntity = await tx
+              .select()
+              .from(classTable)
+              .where(eq(classTable.id, term.classId))
+              .limit(1);
 
-        // Update grading system if provided
-        if (validated.gradingSystem !== undefined) {
-          // Delete existing grading system entries
-          await tx.delete(gradingSystem).where(eq(gradingSystem.academicTermId, term.id));
+            if (!classEntity || classEntity.length === 0 || classEntity[0].name !== validated.className) {
+              // If the class does not exist, create it
+              const newClass = await this.findOrCreateClass(tx, currentUser.schoolId, validated.className);
+              updatedClassId = newClass.id;
+              termUpdateData.classId = updatedClassId;
+            }
+          }
 
-          // Create new grading system entries if array is provided and not empty
-          if (Array.isArray(validated.gradingSystem) && validated.gradingSystem.length > 0) {
-            await tx.insert(gradingSystem).values(
-              validated.gradingSystem.map((entry) => ({
-                id: crypto.randomUUID(),
+          // Check for unique constraint violation if academicYear, term, or class changed
+          if (
+            validated.academicYear !== term.academicYear ||
+            validated.term !== term.term ||
+            updatedClassId !== term.classId
+          ) {
+            const conflictingTerm = await tx
+              .select()
+              .from(academicTerm)
+              .where(
+                and(
+                  eq(academicTerm.classId, updatedClassId),
+                  eq(academicTerm.academicYear, validated.academicYear),
+                  eq(academicTerm.term, validated.term),
+                ),
+              )
+              .limit(1);
+
+            if (conflictingTerm && conflictingTerm.length > 0 && conflictingTerm[0].id !== term.id) {
+              throw new BadRequestException('An academic term with this class, year, and term already exists');
+            }
+          }
+
+          // Now,update academic term
+          await tx.update(academicTerm).set(termUpdateData).where(eq(academicTerm.id, term.id));
+
+          // Update grading entry if provided
+          if (validated.gradingEntry.length > 0) {
+            // Delete existing grading entry entries (This is safe b/c it is an entry with no FK constraints)
+            await tx.delete(gradingEntry).where(eq(gradingEntry.academicTermId, term.id));
+
+            // Create new grading entry entries if array is provided and not empty
+            await tx.insert(gradingEntry).values(
+              validated.gradingEntry.map((entry) => ({
                 grade: entry.grade,
                 minScore: entry.minScore,
                 maxScore: entry.maxScore,
@@ -336,37 +207,88 @@ export class TermService {
               })),
             );
           }
+
+          return {
+            success: 'Term information updated successfully',
+          };
         }
+        else {
+          // Create new term. First, find or create class
+          const classEntity = await this.findOrCreateClass(tx, currentUser.schoolId, validated.className);
 
-        // Fetch updated term with related data
-        const [updatedTerm] = await tx
-          .select()
-          .from(academicTerm)
-          .where(eq(academicTerm.id, term.id))
-          .limit(1);
+          // Check for unique constraint violation(Extra precaution. Speed-safety tradeoff)
+          const existingTerm = await tx
+            .select()
+            .from(academicTerm)
+            .where(
+              and(
+                eq(academicTerm.classId, classEntity.id),
+                eq(academicTerm.academicYear, validated.academicYear),
+                eq(academicTerm.term, validated.term),
+              ),
+            )
+            .limit(1);
 
-        const classEntity = await tx
-          .select()
-          .from(classTable)
-          .where(eq(classTable.id, updatedTerm.classId))
-          .limit(1);
+          // If the term exists, throw a bad request exception
+          if (existingTerm && existingTerm.length > 0) {
+            throw new BadRequestException('An academic term with this class, year, and term already exists');
+          }
 
-        const gradingSystemData = await tx
-          .select()
-          .from(gradingSystem)
-          .where(eq(gradingSystem.academicTermId, term.id));
+          // Create new academic term
+          const newTermResult = await tx
+            .insert(academicTerm)
+            .values({
+              academicYear: validated.academicYear,
+              term: validated.term,
+              termDays: validated.termDays ?? null,
+              termStart: validated.termStart ?? null,
+              termEnd: validated.termEnd ?? null,
+              resultTemplateUrl: null,  // TODO: Add/Remove this. Make up your mind later.
+              userId: userId,
+              schoolId: currentUser.schoolId,
+              classId: classEntity.id,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .returning();
+          const newTerm = newTermResult[0];
 
-        return {
-          ...updatedTerm,
-          className: classEntity[0]?.name || '',
-          gradingSystem: gradingSystemData,
-        };
+          // Link newly created term to user
+          await tx
+            .update(user)
+            .set({ academicTermId: newTerm.id, updatedAt: new Date() })
+            .where(eq(user.id, userId));
+
+          // Create grading entry if provided
+          if (validated.gradingEntry.length > 0) {
+            await tx.insert(gradingEntry).values(
+              validated.gradingEntry.map((entry) => ({
+                grade: entry.grade,
+                minScore: entry.minScore,
+                maxScore: entry.maxScore,
+                remark: entry.remark ?? null,
+                academicTermId: newTerm.id,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              })),
+            );
+          }
+
+          return {
+            success: 'Term information created successfully',
+          };
+        }
       });
-    } catch (error) {
+    }
+    catch (error) {
+      // If the error is a bad request exception or not found exception, throw it
       if (error instanceof BadRequestException || error instanceof NotFoundException) {
         throw error;
       }
-      throw new BadRequestException('Failed to update term');
+      // Otherwise, throw an internal server error for unexpected errors
+      throw new InternalServerErrorException(
+        userAcademicTermId ? 'Failed to update term information' : 'Failed to create term information',
+      );
     }
   }
 }
