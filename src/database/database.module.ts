@@ -1,5 +1,7 @@
 // This file defines a (drizzle) database connection module (provider)
 // Drizzle doesn't have an official @nestjs/drizzle package (yet), so this file uses a custom provuder with drizle() factory.
+// The DB Module is delebrately not made a Global module to make dependencies obvious, avoid surprise coupling, and prevent accidental multiple “hidden” providers when the app grows
+
 
 import { Module } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -8,6 +10,8 @@ import { DATABASE_CONNECTION } from "./database-connection.token";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "../auth/schema";
 
+
+// @Global()
 @Module({
     providers: [
         {

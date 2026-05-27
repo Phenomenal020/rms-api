@@ -1,18 +1,35 @@
-import {
-  Injectable,
-  BadRequestException,
-  UnauthorizedException,
-  NotFoundException,
-  InternalServerErrorException,
-} from '@nestjs/common';
-import { Inject } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, NotFoundException, InternalServerErrorException, ConflictException, Inject } from '@nestjs/common';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
-import { assessmentStructure, academicTerm, assessmentScore } from '../auth/schema';
+import { assessmentStructure, academicTerm, member } from '../auth/schema';
 import { eq, and, inArray } from 'drizzle-orm';
-import { validateAssessmentStructurePayload } from './assessment-structure.validation';
-import { UpsertAssessmentStructureDto } from './dto/assessment-structure.dto';
+import { validateAssessmentEntries } from './assessment-structure.validation';
+import { CreateAssessmentStructureDto, UpdateAssessmentStructureDto, UpdateAssessmentEntryDto, CreateAssessmentEntryDto } from './dto/assessment-structure.dto';
 import * as schema from '../auth/schema';
+
+// Re-throw known NestJS HTTP exceptions; wrap everything else as 500
+function rethrowOrWrap(error: unknown, fallbackMessage: string): never {
+  if (
+    error instanceof BadRequestException ||
+    error instanceof UnauthorizedException ||
+    error instanceof NotFoundException ||
+    error instanceof ConflictException ||
+    error instanceof InternalServerErrorException
+  ) {
+    throw error;
+  }
+  if (error instanceof Error && (error.message.includes('unique') || error.message.includes('duplicate'))) {
+    throw new ConflictException('Assessment structure conflicts with existing rows (duplicate type or order for this term)');
+  }
+  if (error instanceof Error && 'code' in error && (error as any).code === '23503') {
+    throw new BadRequestException(
+      'Cannot remove assessment components that already have scores recorded. ' +
+      'Please delete all assessment scores for this term before changing its structure.',
+    );
+  }
+  throw new InternalServerErrorException(fallbackMessage);
+}
+
 
 @Injectable()
 export class AssessmentStructureService {
@@ -21,171 +38,187 @@ export class AssessmentStructureService {
     private readonly db: NodePgDatabase<typeof schema>,
   ) { }
 
-  // takes userId and assessment structure payload. Performs db upsert operation.
-  async upsertAssessmentStructures(userId: string, assessmentStructuresPayload: UpsertAssessmentStructureDto[]) {
 
-    // Validate assessment structure input (payload)
-    const result = validateAssessmentStructurePayload(assessmentStructuresPayload);
-    if (!result.isValid) {
-      throw new BadRequestException(result.error);
-    }
-
-    // Get the user's academic term
-    const userAcademicTerms = await this.db
-      .select()
-      .from(academicTerm)
-      .where(eq(academicTerm.userId, userId))
+  private async assertTermOwnership(userId: string, termId: string): Promise<string> {
+    const [row] = await this.db
+      .select({ organizationId: member.organizationId })
+      .from(member)
+      .innerJoin(
+        academicTerm,
+        and(
+          eq(academicTerm.organizationId, member.organizationId),
+          eq(academicTerm.id, termId),
+        ),
+      )
+      .where(eq(member.userId, userId))
       .limit(1);
-    if (!userAcademicTerms || userAcademicTerms.length === 0) {
-      throw new BadRequestException(
-        'No academic term record found. Please set up your academic term first before you can add assessment structures',
-      );
-    }
-    const userAcademicTerm = userAcademicTerms[0];
 
-    // Get the user's assessment structures for this academic term
-    const userAssessmentStructures = await this.db
+    if (!row) {
+      throw new NotFoundException('Academic term not found or does not belong to your school');
+    }
+
+    return row.organizationId;
+  }
+
+  // Get assessment structure for a term. GET /assessment-structure/{termId}
+  async getAssessmentStructure(userId: string, termId: string) {
+    // ownership check
+    await this.assertTermOwnership(userId, termId);
+
+    const rows = await this.db
+      .select({
+        id: assessmentStructure.id,
+        type: assessmentStructure.type,
+        percentage: assessmentStructure.percentage,
+        displayOrder: assessmentStructure.displayOrder,
+        createdAt: assessmentStructure.createdAt,
+        updatedAt: assessmentStructure.updatedAt,
+      })
+      .from(assessmentStructure)
+      .where(eq(assessmentStructure.academicTermId, termId));
+
+    return {
+      success: 'Assessment structure fetched successfully',
+      data: rows,
+    };
+  }
+
+  // Create assessment structure for a term. POST /assessment-structure
+  async createAssessmentStructure(userId: string, payload: CreateAssessmentStructureDto) {
+    // Business logic validation
+    const validation = validateAssessmentEntries(payload.entries);
+    if (!validation.isValid) {
+      throw new BadRequestException(validation.error);
+    }
+
+    // Assert that the user is the owner of the term
+    const organisationId = await this.assertTermOwnership(userId, payload.termId);
+
+    try {
+      await this.db.insert(assessmentStructure).values(
+        payload.entries.map(entry => ({
+          type: entry.type,
+          percentage: entry.percentage,
+          displayOrder: entry.displayOrder,
+          academicTermId: payload.termId,
+          organizationId: organisationId
+        })),
+      );
+
+      return { success: 'Assessment structure created successfully', data: null };
+    } catch (error) {
+      rethrowOrWrap(error, 'Failed to create assessment structure. Please try again later.');
+    }
+  }
+
+  // Update assessment structure for a term. PATCH /assessment-structure/{termId}
+  async updateAssessmentStructure(userId: string, termId: string, payload: UpdateAssessmentStructureDto) {
+    // Business logic validation
+    const validation = validateAssessmentEntries(payload.entries);
+    if (!validation.isValid) {
+      throw new BadRequestException(validation.error);
+    }
+
+    // Assert that the user is the owner of the term
+    const organisationId = await this.assertTermOwnership(userId, termId);
+
+    // Fetch existing structures for this term (needed for the diff)
+    const dbStructures = await this.db
       .select()
       .from(assessmentStructure)
-      .where(eq(assessmentStructure.academicTermId, userAcademicTerm.id));
+      .where(eq(assessmentStructure.academicTermId, termId));
 
-    // Build lookup maps by id for db assessment structures (O(1) > O(n))
-    const dbAssessmentStructuresById = new Map<string, (typeof userAssessmentStructures)[number]>();
-    for (const as of userAssessmentStructures) {
-      if (as.id) {
-        dbAssessmentStructuresById.set(as.id, as);
+    // Create a map for O(1) lookup by id
+    const existingById = new Map(dbStructures.map(s => [s.id, s]));
+
+    // Partition incoming entries
+    // Case 1: Update an existing entry (exists in db and payload)
+    const toUpdate: UpdateAssessmentEntryDto[] = [];  // Entries to update
+    // Case 2: Insert a new entry (not in db but in payload)
+    const toInsert: CreateAssessmentEntryDto[] = [];  // Entries to insert
+    // Case 3: Delete an entry (exists in db and not in payload)
+    const toDelete: UpdateAssessmentEntryDto[] = [];  // Entries to delete
+    // Invalid entries
+    // Case 4: Invalid ids (not in db and not in payload)
+    const invalidIds: string[] = [];  // Invalid ids
+
+    // Partition the entries into the four cases
+    for (const entry of payload.entries) {
+      if (entry.id) {
+        if (existingById.has(entry.id)) {
+          toUpdate.push(entry);  // In db and payload -> update
+        } else {
+          invalidIds.push(entry.id);  // in payload but not in db -> invalid
+        }
+      }
+      else {
+        toInsert.push(entry);  // null or undefined id → new entry to be added
       }
     }
 
-    // Initialise lookup maps by id for assessment structures in both db and payload
-    const payloadAndDbAssessmentStructuresById = new Map<string, UpsertAssessmentStructureDto>();
-
-    // Initialise array for new assessment structures in payload but not in DB → create
-    const payloadNewAssessmentStructures: UpsertAssessmentStructureDto[] = [];
-
-    // Initialise an array for invalid ids
-    const invalidIds: string[] = [];
-
-    // for each assessment structure in the payload
-    for (const as of assessmentStructuresPayload) {
-      // if the assessment structure id is defined, then this assessment structure is being updated
-      if (as.id) {
-        // if the assessment structure id is in the db, add it to the lookup map for update
-        if (dbAssessmentStructuresById.has(as.id)) {
-          payloadAndDbAssessmentStructuresById.set(as.id, as);
-        }
-        // if the assessment structure id is not in the db, then it is an invalid id. Add it to the invalid ids array
-        else {
-          invalidIds.push(as.id);
-        }
-      } else {
-        // if the assessment structure id is not defined, then this assessment structure is being created
-        payloadNewAssessmentStructures.push(as);
-      }
-    }
-
-    // Validate that all provided IDs exist in the user's academic term
-    // Note: Ownership validation is implicit - dbAssessmentStructuresById only contains assessment structures from user's academic term. So any ID not in dbAssessmentStructuresById either doesn't exist or doesn't belong to the user
     if (invalidIds.length > 0) {
       throw new BadRequestException(
-        `Invalid assessment structures. These assessment structures do not exist or do not belong to your academic term. Please refresh the page and try again.`
+        'One or more assessment entries do not belong to this term. Please refresh and try again.',
       );
     }
 
-    // Assessment structures that exist in both payload and DB → update
-    const assessmentStructuresToUpdate: UpsertAssessmentStructureDto[] = [];
-    for (const [id, payloadAssessmentStructure] of payloadAndDbAssessmentStructuresById.entries()) {
-      assessmentStructuresToUpdate.push(payloadAssessmentStructure);
-    }
+    // Existing ids absent from the payload (but in db) → candidates for deletion
+    const updateIds = new Set(toUpdate.map(e => e.id!));
+    const toDeleteIds = dbStructures
+      .filter(s => !updateIds.has(s.id))
+      .map(s => s.id);
 
-    // Assessment structures in DB but not in payload → delete
-    const assessmentStructuresToDeleteIds: string[] = [];
-    for (const [id] of dbAssessmentStructuresById.entries()) {
-      if (!payloadAndDbAssessmentStructuresById.has(id)) {
-        assessmentStructuresToDeleteIds.push(id);
-      }
-    }
-
-    // Run all mutations in a transaction
     try {
-      await this.db.transaction(async (tx) => {
-        
-        // Delete removed assessment structures
-        if (assessmentStructuresToDeleteIds.length > 0) {
-          // Check if any assessment structures to delete have existing scores (Proactive check before reaching the database)
-          // This prevents cascade deletion of assessment scores which would cause permanent data loss
-          const structuresInUse = await tx
-            .select({ assessmentStructureId: assessmentScore.assessmentStructureId })
-            .from(assessmentScore)
-            .where(inArray(assessmentScore.assessmentStructureId, assessmentStructuresToDeleteIds));
+      const savedEntries = await this.db.transaction(async (tx) => {
 
-          if (structuresInUse.length > 0) {
-            // Get the assessment structure types for better error message
-            const inUseStructureIds = new Set(structuresInUse.map(s => s.assessmentStructureId));  // use a set of structure ids to avoid duplicates
-            const inUseStructures = userAssessmentStructures.filter(s => s.id && inUseStructureIds.has(s.id));  // filter the user assessment structures to only include the structures that are in use
-            const structureTypes = inUseStructures.map(s => s.type).join(', ');   // join the structure types with a comma
-
-            throw new BadRequestException(
-              `Cannot delete assessment structure. One or more have existing assessment scores. Please remove all assessment scores before modifying the structure.`
-            );
-          }
-
-          // At this point, we can safely delete the assessment structures
-          // Note: Database cascade (onDelete: "cascade") will handle cleanup if any scores exist, but our validation above prevents this scenario
+        // Delete removed entries — onDelete: restrict on assessmentScore will reject
+        // this if any scores exist, caught and translated to 400 by rethrowOrWrap.
+        if (toDeleteIds.length > 0) {
           await tx
             .delete(assessmentStructure)
             .where(
               and(
-                eq(assessmentStructure.academicTermId, userAcademicTerm.id),
-                inArray(assessmentStructure.id, assessmentStructuresToDeleteIds),
+                eq(assessmentStructure.academicTermId, termId),
+                inArray(assessmentStructure.id, toDeleteIds),
               ),
             );
         }
 
-      // Update matching assessment structures
-      for (const as of assessmentStructuresToUpdate) {
-        await tx
-          .update(assessmentStructure)
-          .set({
-            type: as.type,
-            percentage: as.percentage,
-            order: as.order,
-            // add other updatable fields here if needed
-          })
-          .where(and(eq(assessmentStructure.academicTermId, userAcademicTerm.id), eq(assessmentStructure.id, as.id!)));
-      }
+        // Update in-place (preserves ids and thus assessmentScore FK references)
+        for (const entry of toUpdate) {
+          await tx
+            .update(assessmentStructure)
+            .set({
+              type: entry.type,
+              percentage: entry.percentage,
+              displayOrder: entry.displayOrder,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(assessmentStructure.academicTermId, termId),
+                eq(assessmentStructure.id, entry.id!),
+              ),
+            );
+        }
 
-        // Create new assessment structures (no id in payload)
-        // ID is auto-generated by drizzle using gen_random_uuid()
-        for (const as of payloadNewAssessmentStructures) {
-          await tx.insert(assessmentStructure).values({
-            type: as.type,
-            percentage: as.percentage,
-            order: as.order,
-            academicTermId: userAcademicTerm.id,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
+        // Insert newly added entries
+        if (toInsert.length > 0) {
+          await tx.insert(assessmentStructure).values(
+            toInsert.map(entry => ({
+              type: entry.type,
+              percentage: entry.percentage,
+              displayOrder: entry.displayOrder,
+              academicTermId: termId,
+              organizationId: organisationId
+            })),
+          );
         }
       });
+
+      return { success: 'Assessment structure updated successfully', data: null };
     } catch (error) {
-      // Re-throw known NestJS exceptions without wrapping
-      if (
-        error instanceof BadRequestException ||
-        error instanceof UnauthorizedException ||
-        error instanceof NotFoundException ||
-        error instanceof InternalServerErrorException
-      ) {
-        throw error;
-      }
-
-      // Re-throw unexpected errors
-      throw new InternalServerErrorException(
-        'Failed to update assessment structures. Please try again later.'
-      );
+      rethrowOrWrap(error, 'Failed to update assessment structure. Please try again later.');
     }
-
-    return { success: 'Assessment structures updated successfully' };
   }
-
 }

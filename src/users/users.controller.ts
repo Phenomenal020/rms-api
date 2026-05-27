@@ -1,29 +1,30 @@
-import { Controller, Get, Patch, Body, HttpCode } from "@nestjs/common";
-import { Session } from "@thallesp/nestjs-better-auth";
-import type { UserSession } from "@thallesp/nestjs-better-auth";
-import { UsersService } from "./users.service";
-import { UpdateProfileDto } from "./dto/update-profile.dto";
+import { Controller, Get, Patch, Body, HttpCode } from '@nestjs/common';
+import { Public, Session, type UserSession } from '@thallesp/nestjs-better-auth';
+import { UsersService } from './users.service';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 
 @Controller('users')
 export class UsersController {
-    constructor(private readonly usersService: UsersService) { }
+  constructor(private readonly usersService: UsersService) { }
 
-    @Get('session')
-    getSesssion(@Session() session: UserSession) {
-        return session.user
-    }
+  // GET /users/session — current session user, or null when not logged in
+  @Get('session')
+  // @Public()
+  getSesssion(@Session() session: UserSession) {
+    return session?.user ?? null;
+  }
 
-    @Patch('profile')
-    @HttpCode(204)
-    async updateProfile(
-        @Session() session: UserSession,
-        @Body() updateProfileDto: UpdateProfileDto  // validate the body even before the handler runs.
-    ): Promise<void> {
-        await this.usersService.updateProfile(session.user.id, updateProfileDto);
-    }
+  @Patch('profile')
+  @HttpCode(204)
+  async updateProfile(
+    @Session() session: UserSession,
+    @Body() updateProfileDto: UpdateProfileDto,
+  ): Promise<void> {
+    await this.usersService.updateProfile(session.user.id, updateProfileDto);
+  }
 
-    @Get('user')
-    async getCurrentUser(@Session() session: UserSession) {
-        return this.usersService.getUserWithRelations(session.user.id);
-    }
+  @Get('user')
+  async getCurrentUser(@Session() session: UserSession) {
+    return this.usersService.getUser(session.user.id);
+  }
 }

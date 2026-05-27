@@ -1,28 +1,51 @@
-import {
-    Controller,
-    Post,
-    Body,
-    HttpCode,
-    UnauthorizedException,
-} from '@nestjs/common';
+import { Controller, Post, Get, Body, HttpCode, Query, UseGuards } from '@nestjs/common';
 import { StudentViewService } from './student-view.service';
-import { SaveStudentScoresDto } from './dto/save-student-scores.dto';
+import { SaveClassRecordExportDto, SaveStudentScoresDto, GetTeacherClassesQueryDto, GetClassRecordQueryDto } from './dto/student-view.dto';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
+import { UserGuard } from '../auth/guards/user.guard';
 
 @Controller('student-view')
+@UseGuards(UserGuard)
 export class StudentViewController {
-    constructor(private readonly studentViewService: StudentViewService) { }
+  constructor(private readonly studentViewService: StudentViewService) { }
 
-    // Save student assessment scores
-    @Post('save-scores')
-    @HttpCode(200)
-    async saveStudentScores(
-        @Session() session: UserSession, @Body() payload: SaveStudentScoresDto,) {
-        // Validate session exists
-        if (!session?.user?.id) {
-            throw new UnauthorizedException('Unauthorised user');
-        }
+  // Get the class assigned to the form teacher for the given term
+  @Get('classes')
+  @HttpCode(200)
+  async getTeacherClasses(
+    @Session() session: UserSession,
+    @Query() query: GetTeacherClassesQueryDto,
+  ) {
+    return this.studentViewService.getTeacherClasses(session.user.id, query.termId);
+  }
 
-        return this.studentViewService.saveStudentScores(session, payload);
-    }
+  // Get the class record for the given class and term
+  @Get('class-record')
+  @HttpCode(200)
+  async getClassRecord(
+    @Session() session: UserSession,
+    @Query() query: GetClassRecordQueryDto,
+  ) {
+    return this.studentViewService.getClassRecord(session.user.id, query.classId, query.termId);
+  }
+
+  // Save student assessment scores
+  @Post('save-scores')
+  @HttpCode(200)
+  async saveStudentScores(
+    @Session() session: UserSession,
+    @Body() payload: SaveStudentScoresDto,
+  ) {
+    return this.studentViewService.saveStudentScores(session.user.id, payload);
+  }
+
+  // Save class record export request
+  @Post('export')
+  @HttpCode(200)
+  async saveClassRecordExport(
+    @Session() session: UserSession,
+    @Body() payload: SaveClassRecordExportDto,
+  ) {
+    return this.studentViewService.saveClassRecordExport(session.user.id, payload);
+  }
 }

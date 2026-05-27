@@ -17,16 +17,16 @@
 import type { InferSelectModel } from 'drizzle-orm';
 import { 
   user,
-  school, 
+  organization, 
   academicTerm, 
   subject, 
   assessmentStructure, 
   gradingEntry, 
   student,
-  studentSubject,
+  studentSubjectEnrollment,
+  subjectClassAssignment,
   assessment,
   assessmentScore,
-  classTable
 } from '../auth/schema';
 
 // ============================================================================
@@ -34,32 +34,30 @@ import {
 // ============================================================================
 // This gives you the type of a single row from each table
 export type User = InferSelectModel<typeof user>;
-export type School = InferSelectModel<typeof school>;
+export type Organization = InferSelectModel<typeof organization>;
 export type AcademicTerm = InferSelectModel<typeof academicTerm>;
 export type Subject = InferSelectModel<typeof subject>;
 export type AssessmentStructure = InferSelectModel<typeof assessmentStructure>;
 export type GradingEntry = InferSelectModel<typeof gradingEntry>;
 export type Student = InferSelectModel<typeof student>;
-export type StudentSubject = InferSelectModel<typeof studentSubject>;
+export type StudentSubjectEnrollment = InferSelectModel<typeof studentSubjectEnrollment>;
+export type SubjectClassAssignment = InferSelectModel<typeof subjectClassAssignment>;
 export type Assessment = InferSelectModel<typeof assessment>;
 export type AssessmentScore = InferSelectModel<typeof assessmentScore>;
-export type Class = InferSelectModel<typeof classTable>;
 
 // ============================================================================
 // Option 2: Manually construct the relational query type
 // ============================================================================
-// This matches the exact structure of your getUserWithRelations query
-// Use this when you need full type safety for nested relations
+// This matches the shape of the admin-facing queries.
+// Use this when you need full type safety for nested relations.
 export type UserWithRelations = User & {
-  school: School | null;
+  organization: Organization | null;
   academicTerm: (AcademicTerm & {
-    class: Class | null;
-    subjects: Subject[];
-    assessmentStructure: AssessmentStructure[];
-    gradingEntry: GradingEntry[];
+    subjectClassAssignments: SubjectClassAssignment[];
+    assessmentStructures: AssessmentStructure[];
+    gradingEntries: GradingEntry[];
     students: (Student & {
-      subjects: (StudentSubject & {
-        subject: Subject | null;
+      enrollments: (StudentSubjectEnrollment & {
         assessments: (Assessment & {
           scores: AssessmentScore[];
         })[];

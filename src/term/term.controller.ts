@@ -1,22 +1,40 @@
-import { Controller, Post, Body, UnauthorizedException, HttpCode } from '@nestjs/common';
-import { Session } from '@thallesp/nestjs-better-auth';
-import type { UserSession } from '@thallesp/nestjs-better-auth';
+import { Controller, Get, Post, Patch, Body, HttpCode, Param, UseGuards } from '@nestjs/common';
+import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { TermService } from './term.service';
-import { UpsertTermDto } from './dto/upsert-term.dto';
+import { CreateTermDto, UpdateTermDto, PatchTermParamsDto } from './dto/term.dto';
+import { OrgAdminGuard } from '../auth/guards/org-admin.guard';
 
-@Controller('term')
+@Controller('terms')
+@UseGuards(OrgAdminGuard)
 export class TermController {
   constructor(private readonly termService: TermService) { }
 
-  // Upsert academic term (create or update)
-  @Post('update')
+  // Fetch the terms for the authenticated user's school.
+  // Returns null when no terms exist yet — not an error.
+  @Get()
   @HttpCode(200)
-  async upsertTerm(@Session() session: UserSession, @Body() termData: UpsertTermDto) {
-    // Validate session exists
-    if (!session?.user?.id) {
-      throw new UnauthorizedException('Unauthorised user');
-    }
+  async getTerms(@Session() session: UserSession) {
+    return this.termService.getTerms(session.user.id);
+  }
 
-    return this.termService.upsertTerm(session.user.id, termData);
+  // Create a new academic term
+  @Post()
+  @HttpCode(201)
+  async createTerm(
+    @Session() session: UserSession,
+    @Body() termData: CreateTermDto,
+  ) {
+    return this.termService.createTerm(session.user.id, termData);
+  }
+
+  // Update an existing academic term (dates and days only — academicYear/term are immutable)
+  @Patch(':id')
+  @HttpCode(200)
+  async updateTerm(
+    @Session() session: UserSession,
+    @Param() params: PatchTermParamsDto,
+    @Body() data: UpdateTermDto,
+  ) {
+    return this.termService.updateTerm(session.user.id, params.id, data);
   }
 }

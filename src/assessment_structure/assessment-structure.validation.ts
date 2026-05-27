@@ -1,49 +1,53 @@
-import { UpsertAssessmentStructureDto } from "./dto/assessment-structure.dto";
+import { CreateAssessmentEntryDto, UpdateAssessmentEntryDto } from "./dto/assessment-structure.dto";
 
 export interface ValidationResult {
     isValid: boolean;
     error?: string;
 }
 
-// Validates assessment structure input — business logic only (shape checks are in the DTO)
-export function validateAssessmentStructurePayload(assessmentStructurePayload: UpsertAssessmentStructureDto[]): ValidationResult {
-    // Array-level validation: at least one assessment structure is required
-    if (!assessmentStructurePayload || !Array.isArray(assessmentStructurePayload) || assessmentStructurePayload.length === 0) {
-        return { isValid: false, error: 'At least one assessment structure is required' };
+// Validates the assessment entries array — business logic only.
+// Shape checks (type, range, required) are enforced by the DTO decorators + ValidationPipe.
+export function validateAssessmentEntries(entries: CreateAssessmentEntryDto[] | UpdateAssessmentEntryDto[]): ValidationResult {
+    // Array-level: at least one entry required
+    if (!entries || !Array.isArray(entries) || entries.length === 0) {
+        return { isValid: false, error: 'At least one assessment component is required' };
     }
 
     let total = 0;
     const orders = new Set<number>();
-    const seenTypes = new Map<string, number>(); // Map<lowercaseType, firstIndex> for O(1) lookup
+    const seenTypes = new Map<string, number>(); // Map<lowercaseType, firstIndex> for O(1) duplicate lookup
 
-    for (let i = 0; i < assessmentStructurePayload.length; i++) {
-        const as = assessmentStructurePayload[i];
+    for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+
+        if (entry.percentage < 1) {
+            return { isValid: false, error: `Entry ${i + 1}: percentage must be at least 1%` };
+        }
 
         // Accumulate percentage for total validation
-        total += as.percentage; // Guaranteed to be a number 0-100 by DTO
+        total += entry.percentage;
 
-        // Check for duplicate order numbers (business logic)
-        if (orders.has(as.order)) {
-            return { isValid: false, error: `Assessment structure ${i + 1}: Duplicate order number detected: ${as.order}` };
+        // Duplicate displayOrder check
+        if (orders.has(entry.displayOrder)) {
+            return { isValid: false, error: `Entry ${i + 1}: Duplicate display order: ${entry.displayOrder}` };
         }
-        orders.add(as.order);
+        orders.add(entry.displayOrder);
 
-        // Check for duplicate assessment structure types (case-insensitive, business logic)
-        const caseInsensitiveType = as.type.toLowerCase(); // Already trimmed by DTO
-        if (seenTypes.has(caseInsensitiveType)) {
-            const firstIndex = seenTypes.get(caseInsensitiveType)!;
-            const duplicateType = assessmentStructurePayload[firstIndex].type;
+        // Duplicate type check (case-insensitive)
+        const normalised = entry.type.toLowerCase(); // Already trimmed by DTO
+        if (seenTypes.has(normalised)) {
+            const firstIndex = seenTypes.get(normalised)!;
             return {
                 isValid: false,
-                error: `Assessment structure ${i + 1}: Duplicate assessment type found: "${duplicateType}". Each assessment type must be unique and case-insensitive.`
+                error: `Entry ${i + 1}: Duplicate assessment type "${entries[firstIndex].type}". Types must be unique (case-insensitive).`
             };
         }
-        seenTypes.set(caseInsensitiveType, i);
+        seenTypes.set(normalised, i);
     }
 
-    // Validate total percentage equals 100 (business logic)
+    // Total percentage must equal exactly 100%
     if (total !== 100) {
-        return { isValid: false, error: 'Assessment percentages must total exactly 100%' };
+        return { isValid: false, error: `Assessment percentages must total exactly 100%. Current total: ${total}%` };
     }
 
     return { isValid: true };
