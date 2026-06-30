@@ -1,0 +1,541 @@
+================================================================================
+USERS API — CODE REVIEW
+Route: api/src/users
+Reviewed: 2026-06-22
+Files: users.controller.ts, users.service.ts, users.module.ts,
+       dto/update-profile.dto.ts, dto/update-recovery.dto.ts, types.ts, todo.md
+Related: auth/schema.ts, auth/auth-setup.ts, common/filters/*,
+         common/interceptors/*, app.module.ts, main.ts
+Client counterpart: client/contexts/user-context.tsx, client/fetcher/queries.ts
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The users module is a thin identity layer on top of Better Auth: session peek,
+full user row fetch, and profile name update. It correctly relies on the global
+AuthGuard for authentication and scopes DB writes to session.user.id. Unlike
+org-admin modules (classes, subjects), it has no OrgAdminGuard — appropriate for
+self-service profile routes.
+
+Main gaps: (1) GET /users/session has @Public() commented out — conflicts with
+“return null when logged out” and breaks unauthenticated shell UX; (2) GET
+responses are wrapped by ResponseTransformInterceptor but client code often treats
+the envelope as the user object (user.role vs user.data.role); (3) getUser
+returns the full user row (banned, banReason, etc.) with no response DTO; (4)
+UpdateProfileDto whitelists role/subscription/image but service ignores them —
+privilege-escalation footgun; (5) no runWithDbContext on DB paths; (6) no
+LoggingInterceptor; (7) commented recovery flow and stale types.ts / todo.md.
+Better Auth owns most user lifecycle (signup, password, 2FA); this module
+should stay minimal and explicit about what it exposes.
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • Global middleware in AppModule.configure(): requestId, requestLogger on
+    all routes (except GET /health). ✅
+  • main.ts: helmet(), express.json({ limit: '100kb' }). ✅
+  • UsersModule has no module-level middleware — correct.
+
+How middleware applies to /api/v1/users
+  Middleware runs before guards, pipes, and the controller. Suitable for
+  transport-only concerns:
+
+  A) Request ID + logging (app-wide) ✅
+     Profile PATCH and GET /user benefit from traceable errors via requestId.
+
+  B) Body size guard (app-wide) ✅
+     Profile payload is tiny (firstName, lastName). 100 kb limit is sufficient.
+
+  C) Rate limiting (optional, route-scoped) 📌
+     PATCH /users/profile is a single UPDATE. If credential-stuffing or profile
+     spam is a concern, apply a per-IP or per-user rate limit:
+
+       consumer
+         .apply(mutationRateLimiter)
+         .forRoutes({ path: 'users/profile', method: RequestMethod.PATCH });
+
+  D) Stricter limit on identity reads (low) 📌
+     GET /users/user runs on every app load (UserProvider). Usually fine; if
+     abused, rate-limit separately from mutation routes.
+
+What NOT to put in middleware for this route
+  • Session resolution — Better Auth + @Session() decorator + global AuthGuard.
+  • Profile validation — ValidationPipe + DTO.
+  • Role checks — not org-admin routes; user updates own row only via userId
+    from session (service WHERE eq(user.id, userId)).
+
+Verdict: Middleware is used correctly at the app level. No users-specific
+middleware required unless you add rate limits.
+
+
+2) EXCEPTION FILTERS — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+How they work in NestJS (and in this project)
+  • AllExceptionsFilter is global (main.ts).
+  • HttpException → status + body; unhandled errors → 500 + log + requestId.
+  • runWithDbContext maps Postgres codes via postgres-error.mapper.ts — but
+    there is no 'user' context in PgErrorContext today.
+
+Users-specific usage today
+  • updateProfile and getUser call Drizzle directly — no runWithDbContext.
+  • getUser / updateProfile throw UnauthorizedException('User not found') when
+    the row is missing (odd status — 404 NotFoundException may be clearer).
+  • getSession returns session data from decorator — no DB, no filter involvement.
+  • Validation failures on PATCH → 422 via global ValidationPipe.
+
+Mapped errors relevant to users
+  • No user-specific branches in postgres-error.mapper.ts.
+  • Duplicate email — not updatable via this module (changeEmail disabled in
+    auth-setup.ts). ✅
+  • varchar length overflow on name — possible 500 if firstName + lastName exceed
+    128 chars combined in computed name field.
+
+Improvements
+
+  A) Wrap DB methods in runWithDbContext (medium)
+     Add 'user' to PgErrorContext and wrap getUser + updateProfile:
+
+       return runWithDbContext('user', 'Failed to fetch user', async () => { ... }); ✅
+
+     Read paths should not rely on generic 500 for connection failures.
+
+  B) Use NotFoundException for missing user row (low)
+     When session.user.id exists but DB row is gone, 404 is more accurate than
+     401 (which implies bad credentials). ✅
+
+  C) UsersExceptionFilter (optional, low) 📌
+     Only needed for stable error codes (PROFILE_UPDATE_FAILED). Global filter
+     is enough for current scope.
+
+  D) SkipResponseTransform on session-oriented GETs (high — see §5, §6)
+     If clients expect raw session user or raw DB row, opt out of the global
+     envelope or standardise client unwrapping of .data.  ✅
+
+
+3) PIPES — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+How pipes work
+  • Global ValidationPipe: whitelist, forbidNonWhitelisted, transform, 422.
+
+Current usage
+  • PATCH /users/profile → UpdateProfileDto ✅ (decorators present)
+  • GET routes — no body/query DTOs (session from decorator only).
+
+Gaps and recommendations
+
+  A) Remove dead / dangerous DTO fields (high — security) ✅
+     UpdateProfileDto includes optional subscription, role, image. Service never
+     applies them, but ValidationPipe whitelists them — implies they are valid
+     input. Remove from DTO entirely (Better Auth / admin plugins own role and
+     image). Prevents a future developer from wiring role without auth checks. 
+
+  B) @MaxLength(128) on firstName and lastName (high) ✅
+     Schema: user.firstName, user.lastName, user.name are varchar(128).
+     Computed name = `${firstName} ${lastName}` can exceed 128 and cause DB error.
+     Add @MaxLength on each field; consider @MaxLength(128) on combined length via
+     custom validator or cap in service.
+
+  C) @MaxLength on image if ever enabled (low) ✅
+     Schema image varchar(2048) — only relevant if image updates are added.
+
+  D) No pipe on GET /users/session (OK) ✅
+     No input body; session injected by Better Auth.
+
+  E) UpdateRecoveryDto (dormant) 📌
+     Fully validated DTO exists but recovery endpoints are commented out in
+     service/controller. Remove or wire up; userRecovery table not in schema.ts.
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+Guard execution order (this app)
+  1. Global AuthGuard (APP_GUARD) — session required by default
+  2. No module-level guards on UsersController
+  3. Handler
+
+Current state
+  • PATCH /users/profile and GET /users/user require authenticated session. ✅
+  • GET /users/session — @Public() is COMMENTED OUT:
+
+       @Get('session')
+       // @Public()
+       getSesssion(@Session() session: UserSession) {
+         return session?.user ?? null;
+       }
+
+     Comment says “or null when not logged in”, but without @Public() the global
+     AuthGuard returns 401 before the handler runs. Unauthenticated clients
+     (navbar on marketing pages, initial app load) get errors instead of null.
+
+     FIX: Uncomment @Public() on GET /users/session (and @SkipResponseTransform
+     if client expects raw user | null). 📌
+
+  • No OrgAdminGuard — correct. Users update their own profile only.
+
+Possible additions
+
+  A) BannedUserGuard (medium) 📌
+     user table has banned, banReason, banExpires (admin plugin). If banned users
+     should not PATCH profile or use app APIs, add a guard or service check after
+     loading the user row.
+
+  B) EmailVerifiedGuard (low) 📌
+     auth-setup requires email verification for login. If verified users only
+     should hit /users/user, enforce in guard or service.
+
+  C) Do NOT add org-scoping guards here
+     Identity routes are user-scoped (session.user.id), not organisation-scoped.
+
+
+5) INTERCEPTORS — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+Current state
+  • Global: TimeoutInterceptor (15 s), ResponseTransformInterceptor.
+  • UsersController has no @UseInterceptors(LoggingInterceptor) (classes and
+    subjects have it).
+  • PATCH /users/profile returns void with @HttpCode(204).
+
+How interceptors affect users today
+
+  A) ResponseTransformInterceptor (high — client contract)
+     • GET /users/user — service returns raw user row → interceptor wraps:
+         { success: true, data: { id, name, email, role, ... } }
+     • GET /users/session — returns session.user | null → wraps:
+         { success: true, data: <user or null> }
+     • Client getUserWithRelations() assigns SWR data to context.user; components
+       use user?.role — but role lives at user.data.role after transform.
+       Same for navbar getUser() → UserDropdown expects flat user shape.
+
+     Fix options (pick one):
+       1. @SkipResponseTransform() on GET session + GET user (session/auth style) ✅
+       2. Return { success: true, data } from service and unwrap .data in client
+       3. Add a slim response DTO in service matching client expectations
+
+  B) PATCH 204 + interceptor (medium)
+     void return may become { success: true, data: undefined }. HTTP 204 should
+     have no body — verify Nest does not serialize a body on 204. If it does,
+     use @SkipResponseTransform() on updateProfile. ✅
+
+  C) LoggingInterceptor (medium) ✅
+     Add for parity with classes/subjects — logs profile updates and slow GET /user.
+
+  D) TimeoutInterceptor (low) ✅
+     Global 15 s is sufficient for single-row queries.
+
+  E) CacheInterceptor (low) 📌
+     GET /users/user is called on every page via UserProvider. Short private
+     cache is risky with role changes; client SWR deduping is enough unless you
+     add explicit invalidation on profile PATCH (mutate already invalidates
+     /users/session but not /users/user — see client gap below).
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request DTOs
+
+  | DTO               | Used on              | Issues |
+  |-------------------|----------------------|--------|
+  | UpdateProfileDto  | PATCH /users/profile | firstName/lastName validated ✅; no @MaxLength; dead role/subscription/image fields |
+  | UpdateRecoveryDto | (not wired)          | Ready but no route; no userRecovery table in schema |
+
+Response DTOs — missing entirely
+
+  getUser returns select() — full user table row to client:
+    id, name, email, emailVerified, image, twoFactorEnabled, firstName, lastName,
+    role, banned, banReason, banExpires, createdAt, updatedAt
+
+  Recommended UserResponseDto (expose only what shell needs):
+
+    class UserResponseDto {
+      id: string;
+      name: string;
+      email: string;
+      emailVerified: boolean;
+      image: string | null;
+      firstName: string | null;
+      lastName: string | null;
+      role: string | null;
+      twoFactorEnabled: boolean | null;
+      // Optional: activeOrganizationId from session — not on user row today
+    }
+
+  Exclude @Exclude() or explicit select(): banned, banReason, banExpires (admin
+  moderation fields should not leak to self-service client).
+
+  GET /users/session — returns Better Auth session user shape (may differ from DB
+  row). Document difference between session user and GET /users/user.
+
+  PATCH /users/profile — 204 No Content; no response body (correct for mutation).
+
+
+7) CODE QUALITY — What could be improved?
+--------------------------------------------------------------------------------
+
+Strengths
+  • Thin controller; clear three-endpoint surface. ✅
+  • Profile update scoped to session.user.id in WHERE clause. ✅
+  • updateProfile recomputes name from firstName + lastName (keeps display name
+    in sync). ✅
+  • UpdateProfileDto uses class-validator (todo.md is stale on this point). ✅
+  • Better Auth handles auth lifecycle; module does not duplicate it. ✅
+
+Issues
+
+  A) @Public() commented out on GET /users/session (high)
+     See §4. Breaks documented “null when logged out” behaviour.  📌
+
+  B) Response envelope vs client (high)
+     See §5A. user-context and sidebar use user.role on wrapped response. ✅
+
+  C) Privilege-escalation footgun in UpdateProfileDto (high)
+     role, subscription, image in DTO but not in service .set(). Remove fields. ✅
+
+  D) getUser returns full row (medium)
+     Leaks banReason, banned, etc. Use explicit select ✅ or response DTO.
+
+  E) No runWithDbContext (medium)
+     Unlike subjects/classes post-review. DB errors → generic 500. ✅
+
+  F) getSesssion typo (low)
+     Method name has three s's — rename to getSession. ✅
+
+  G) Unused imports / dead code (low)
+     users.service.ts: crypto, UpdateRecoveryDto imported; recovery methods
+     commented. types.ts is AI boilerplate unrelated to current service API.
+     todo.md partially outdated (validation exists on DTO now). ✅
+
+  H) Wrong exception type (low)
+     UnauthorizedException for missing DB user — prefer NotFoundException. ✅
+
+  I) Client cache invalidation mismatch (medium — cross-cutting)
+     useUpdateProfile mutates /users/session only; UserProvider uses
+     /users/user. After profile PATCH, GET /user may serve stale name until
+     revalidate. Mutate both keys or unify on one endpoint.
+
+  J) UsersService not exported (low) ✅
+     UsersModule does not export service — fine unless other modules need it.
+
+  K) No LoggingInterceptor (low) ✅
+     See §5C.
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+What works
+  • Validation errors on PATCH → 422 with class-validator messages. ✅
+  • Global AuthGuard → 401 for unauthenticated PATCH /user. ✅
+  • Missing user row → UnauthorizedException (status 401). ✅
+  • Global AllExceptionsFilter logs unexpected errors with requestId. ✅
+
+Gaps
+
+  | Scenario                              | Current behaviour              | Recommended |
+  |---------------------------------------|--------------------------------|-------------|
+  | Unauthenticated GET /users/session    | 401 (AuthGuard)                | @Public() → 200 + null | 📌
+  | Authenticated GET /users/user         | 200 + wrapped row              | Response DTO; client unwrap |
+  | Session user id missing on PATCH      | Possible runtime error         | Guard ensures session |✅
+  | User row deleted but session valid    | 401 "User not found"           | 404 NotFoundException | ✅
+  | firstName + lastName > 128 name       | Possible PG error → 500        | @MaxLength + service guard | ✅
+  | Body sends role/subscription/image    | Ignored by service             | Remove from DTO | ✅
+  | DB connection failure on getUser        | Generic 500                    | runWithDbContext | ✅
+  | PATCH profile DB failure              | Generic 500                    | runWithDbContext | ✅
+  | Banned user uses API                  | No check                       | BannedUserGuard 📌 |
+  | Whitespace-only names after trim      | @IsNotEmpty → 422              | OK ✅ |
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+No users.spec.ts exists (only app.controller.spec.ts in the project).
+Below: unit tests (service, mocked DB) and e2e tests (supertest + test DB).
+
+─── UsersController (e2e / integration) ───
+
+Auth & session
+  [P0] GET /users/session without session, @Public enabled → 200, data: null
+  [P0] GET /users/session without session, @Public disabled (today) → 401
+  [P0] GET /users/session with valid session → 200, session user fields present
+  [P0] GET /users/user without session → 401
+  [P0] PATCH /users/profile without session → 401
+
+GET /users/user
+  [P0] Authenticated user → 200, identity fields returned
+  [P1] Response shape: client can read role (envelope vs SkipResponseTransform)
+  [P1] Does not expose banned/banReason to client (after response DTO added)
+  [P1] User row deleted but session cookie present → 404 or 401 (document choice)
+  [P2] Response includes emailVerified, twoFactorEnabled for shell UI
+
+PATCH /users/profile
+  [P0] Valid firstName + lastName → 204, name recomputed in DB
+  [P0] Omit firstName → 422
+  [P0] Empty string firstName after trim → 422
+  [P1] firstName 129 chars → 422 (after @MaxLength)
+  [P1] Combined name > 128 chars → 422 or 400 (after combined validator)
+  [P1] Body includes role: 'orgadmin' → ignored; DB role unchanged
+  [P1] Unknown body fields → 422 (forbidNonWhitelisted)
+  [P2] Concurrent PATCH → last write wins on name fields
+  [P2] After PATCH, GET /user reflects new name (cache invalidation)
+
+─── UsersService (unit, mocked Drizzle) ───
+
+updateProfile
+  [P0] Updates firstName, lastName, name for correct userId
+  [P0] No row updated → throws (NotFound or Unauthorized)
+  [P1] Does not update role, image, email
+
+getUser
+  [P0] Returns row for valid userId
+  [P0] Missing row → throws
+  [P1] Select list matches response DTO (after hardening)
+
+─── DTO validation (unit) ───
+
+  [P1] UpdateProfileDto rejects blank firstName after trim
+  [P1] UpdateProfileDto rejects invalid types
+  [P2] UpdateRecoveryDto validates question/answer (when feature enabled)
+
+─── Postgres error mapper (unit) ───
+
+  [P2] Add 'user' context for varchar overflow / generic constraints
+
+
+10) DB DESIGN ISSUES (given business logic from the API)
+--------------------------------------------------------------------------------
+
+Domain model
+  • user — Better Auth identity (email, session, role, 2FA, ban fields).
+  • member — school membership (separate from user row); org context not on user.
+  • session.activeOrganizationId — active school on session (not returned by
+    getUser today; client reviews note schoolId confusion).
+
+Alignment
+  • Profile PATCH updates firstName, lastName, name on user row — matches
+    additionalFields in auth-setup.ts. ✅
+  • email change / delete user disabled in Better Auth config — API correctly
+    does not expose those paths. ✅
+  • Role stored on user.role (orgadmin | user | admin) — used by client gates;
+    must not be user-writable via profile PATCH. ✅ (service ignores role in DTO)
+
+Design concerns
+
+  A) No schoolId on user table (by design)
+     Organisation linkage is via member + session.activeOrganizationId. Client
+     comments reference schoolId on user row — outdated. Shell should use
+     organisation module or session active org, not user.schoolId.
+
+  B) userRecovery commented out (product)
+     Service references userRecovery table in comments but table is not in
+     schema.ts. Recovery DTO is orphaned.
+
+  C) Role on user vs role on member (medium)
+     user.role (Better Auth / app role) vs member.role (organisation role).
+     Document which gate uses which; avoid conflating in API responses.
+
+  D) Form teacher / export / class FKs reference user.id (downstream)
+     Deleting users is disabled (deleteUser.enabled: false). Correct — RESTRICT
+     chains on member, organisationClass.formTeacherId, etc.
+
+  E) Dual identity reads (session vs DB)
+     GET /session → session user (may be slightly stale vs DB).
+     GET /user → fresh DB row.
+     Client uses both — document when to use which; consider single source.
+
+
+11) DB / SCHEMA OPTIMISATION (schema.ts — user and related)
+--------------------------------------------------------------------------------
+
+user table
+  • PK: text id, default gen_random_uuid() — OK (Better Auth).
+  • email UNIQUE NOT NULL — OK.
+  • name varchar(128) NOT NULL — profile PATCH must keep computed name within limit.
+  • firstName, lastName varchar(128) nullable — OK.
+  • image varchar(2048) nullable — OK.
+  • role varchar(16) nullable — app-level; no CHECK enum in DB.
+  • banned, banReason, banExpires — admin plugin; do not expose via getUser.
+  • createdAt, updatedAt with $onUpdate — OK.
+  • No index on email beyond UNIQUE — sufficient.
+
+session table
+  • userId FK ON DELETE CASCADE — deleting user removes sessions. ✅
+  • activeOrganizationId — text, no FK to organization in schema (application /
+    Better Auth plugin responsibility). Consider FK for integrity 📌.
+  • index on userId — OK for session lookups.
+
+member table
+  • userId FK ON DELETE RESTRICT — cannot delete user while member row exists.
+    Aligns with deleteUser.enabled: false. ✅
+  • index on userId — OK for requireOrganizationId-style lookups.
+
+account / twoFactor
+  • userId ON DELETE CASCADE — cleanup on user delete. ✅
+
+Cascade summary for user operations
+  • UPDATE profile — no cascades; only user row.
+  • DELETE user (disabled) — would be blocked by member RESTRICT, form_teacher
+    RESTRICT, export createdBy RESTRICT, etc.
+  • Ban user — application should invalidate sessions (Better Auth admin plugin).
+
+Optional schema hardening
+  • CHECK (length(trim(name)) > 0) on user.name.
+  • CHECK on role IN ('user','orgadmin','admin') if roles are fixed set.
+  • FK session.active_organization_id → organization.id ON DELETE SET NULL.
+  • Partial index on user(role) if admin dashboards filter by role at scale.
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0 — Correctness / security / client contract
+  1. Enable @Public() on GET /users/session (or document 401-only behaviour).
+  2. Align ResponseTransform with client: @SkipResponseTransform on user GETs
+     OR unwrap .data in client queries / return explicit envelope from service.
+  3. Remove role, subscription, image from UpdateProfileDto.
+  4. Add @MaxLength(128) on firstName and lastName; guard combined name length.
+
+P1 — Consistency / hardening
+  5. Add UserResponseDto / explicit select on getUser (exclude ban fields).
+  6. Wrap getUser and updateProfile in runWithDbContext('user', ...).
+  7. Add 'user' context to postgres-error.mapper.ts.
+  8. Fix getSesssion → getSession typo.
+  9. Mutate /users/user on profile PATCH (client) or unify identity endpoint.
+  10. Add @UseInterceptors(LoggingInterceptor) on UsersController.
+  11. Add users.service.spec.ts and users e2e tests for P0 cases.
+
+P2 — Polish / future
+  12. Wire recovery endpoints + userRecovery schema or delete UpdateRecoveryDto.
+  13. Delete or relocate types.ts AI boilerplate.
+  14. Update todo.md to reflect current DTO state.
+  15. BannedUserGuard for moderated accounts.
+  16. Return activeOrganizationId on identity payload for client shell.
+  17. Export UsersService only if another module needs it.
+
+================================================================================
+END OF REVIEW
+================================================================================

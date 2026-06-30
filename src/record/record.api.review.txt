@@ -1,0 +1,273 @@
+================================================================================
+RECORD API — CODE REVIEW
+Route: api/src/record  (HTTP: /api/v1/record)
+Reviewed: 2026-06-22
+Files: record.controller.ts, record.service.ts, record.module.ts,
+       dto/record.dto.ts
+Related: auth/schema.ts (class_record_export_request/record), org-context.helper,
+         student-view (creates export requests), common/filters/*,
+         common/interceptors/*, auth/guards/org-admin.guard.ts, auth/roles.ts
+Client counterpart: client/fetcher/queries.ts, mutations.ts (accept/reject),
+                   organisation dashboard pending count
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The record module manages class-record export workflow: teachers submit snapshots
+(student-view); org admins review via GET requests list, GET record JSON, PATCH
+accept/reject.
+
+Strengths: Mixed guard model (GET requests open to orgadmin + user; admin
+mutations guarded); requireTermInOrganization with requireActive on list;
+getRecord uses Drizzle relational query with org scope; accept/reject set
+reviewedBy/reviewedAt; responses already use success: true.
+
+Main gaps: (1) GET requests filter bug — eq(createdBy, formTeacherId) wrong for 
+admin list + mislabels submitter as formTeacherName; (2) PENDING filter
+commented out for orgadmin; (3) accept/reject do not require status PENDING;
+(4) no runWithDbContext on any handler; (5) role check uses raw strings not
+ROLE_* constants; (6) RejectRecordDto no @MaxLength(2000); (7) no
+LoggingInterceptor; (8) getRecord only returns PENDING — cannot preview after
+accept; (9) no UserGuard on GET requests (relies on service role string).
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • App-wide middleware sufficient. ✅
+
+Recommendations
+  A) Optional rate limit on PATCH accept/reject. 📌
+  B) JSON snapshot in class_record_export_record.content — body size already
+     bounded at creation in student-view; no extra middleware needed. ✅
+
+
+2) EXCEPTION FILTERS — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • No runWithDbContext on any method.
+  • ForbiddenException / NotFoundException thrown directly — OK.
+
+Mapped errors
+  • No 'record' context in postgres-error.mapper.
+  • accept/reject UPDATE failures → generic 500.
+
+Improvements
+  A) runWithDbContext on all four handlers ('record' or 'generic'). ✅
+  B) accept/reject: pre-check status === PENDING → 400 if already reviewed. ✅
+
+
+3) PIPES — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • PendingRecordRequestsQueryDto (termId UUID). ✅
+  • RecordQueryDto (requestId UUID). ✅
+  • RejectRecordDto (rejectionReason string). ✅
+
+Gaps
+  A) @MaxLength(2000) on rejectionReason — matches schema varchar(2000). ✅
+  B) @MinLength(1) + @Transform(trim) on rejectionReason. ✅
+  C) Optional @MaxLength on comment if ever exposed via this module. ✅
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+Current state
+  • No controller-level guard — intentional split. ✅
+  • OrgAdminGuard on getRecord, accept, reject only. ✅
+  • GET requests: role checked in service via session.user.role string. ✅
+
+  A) Use ROLE_ORG_ADMIN / ROLE_USER from auth/roles.ts (medium) ✅
+  B) UserGuard on GET requests? Today any authenticated role passes if not
+     orgadmin/user → 403 in service. Platform admin gets 403 — OK. 
+     FIX: UserGuard and OrgAdminGuards used ✅
+  C) Teachers must only see own requests — createdBy filter for user role. ✅
+     (once admin filter bug fixed)
+  D) Org admins should see all PENDING for term — not filtered to
+     createdBy = formTeacherId. 📌
+
+
+5) INTERCEPTORS — General use and improvements
+--------------------------------------------------------------------------------
+
+  A) ResponseTransform — all handlers return success: true. ✅
+  B) LoggingInterceptor (medium) ✅
+  C) TimeoutInterceptor — getRecord loads JSONB; monitor large snapshots. ✅
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request — adequate with §3 gaps.
+
+Response DTOs — missing
+  • RecordRequestListItemDto { id, status, createdAt, classId, className,
+    formTeacherId, submitterName } — fix naming.
+  • RecordSnapshotDto { id, requestId, status, content }.
+
+GET /requests response shape
+  • formTeacherName currently joined from user on createdBy — actually submitter
+    name, not class.formTeacher. 📌
+
+
+7) CODE QUALITY
+--------------------------------------------------------------------------------
+
+Strengths
+  • requireTermInOrganization(..., { requireActive: true }) on list — aligns
+    with export workflow during active term. ✅
+  • getRecord org + requestId + PENDING guard. ✅
+  • accept/reject null rejectionReason / set reviewed metadata. ✅
+
+Issues
+
+  A) requestFilters includes eq(createdBy, formTeacherId) (high) 📌
+     Line compares export.createdBy to organisationClass.formTeacherId.
+     Effect: only rows where submitter equals current form teacher — redundant
+     if always true, breaks if form teacher changed after submit. Admin list
+     should filter org + termId + status PENDING only.
+
+  B) PENDING filter commented for orgadmin (high✅
+     // requestFilters.push(eq(status, 'PENDING'));
+     Admins may see ACCEPTED/REJECTED in "pending requests" UI.
+
+  C) accept/reject: no status guard (high)
+     Can re-accept or re-reject already reviewed requests.
+     FIX: Request status already in place ✅
+
+  D) formTeacherName mislabel (medium) 📌
+     Join user on createdBy → rename submitterName or join form teacher separately.
+
+  E) getRecord hard-coded PENDING only (medium) 📌
+     Admin may need to view snapshot after accept for audit.
+
+  F) No runWithDbContext (medium) ✅
+
+  G) Role string literals 'orgadmin'/'user' (low) ✅
+
+  H) accept/reject not transactional with validation (low)
+     Single UPDATE — OK for now. ✅
+
+  I) No LoggingInterceptor (low) ✅
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+  | Scenario                              | Current        | Recommended |
+  |---------------------------------------|----------------|-------------|
+  | termId not in org / not ACTIVE        | 404 requireTerm| OK ✅ |
+  | role not orgadmin or user             | 403            | OK ✅ |
+  | getRecord foreign requestId           | 404            | OK ✅ |
+  | getRecord non-PENDING                 | 404            | Product: allow ACCEPTED read? |
+  | accept already ACCEPTED               | 200 again      | 400 already reviewed |
+  | reject without reason                 | 422            | OK ✅ |
+  | reason > 2000 chars                   | PG error       | @MaxLength DTO | ✅
+  | GET list wrong filter                 | Empty/wrong rows | Fix filter |  📌
+  | DB failure on PATCH                   | 500 generic    | runWithDbContext | ✅
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+─── Controller (e2e) ───
+
+Auth
+  [P0] GET /requests without session → 401
+  [P0] GET /record without session → 401
+  [P0] PATCH accept as teacher → 401 (OrgAdminGuard)
+  [P0] GET /requests as orgadmin → 200
+
+GET /requests?termId=
+  [P0] Orgadmin sees PENDING requests for active term in org
+  [P0] Teacher sees only own requests (all statuses or product-defined)
+  [P1] DRAFT/ARCHIVED termId → 404 (requireActive)
+  [P1] Foreign termId → 404
+  [P1] Invalid UUID → 422
+
+GET /record?requestId=
+  [P0] PENDING request in org → 200 with content JSON
+  [P0] Foreign requestId → 404
+  [P1] ACCEPTED request → 404 today
+
+PATCH /accept?requestId=
+  [P0] PENDING → ACCEPTED, reviewedBy set
+  [P0] Already ACCEPTED → 400 (after fix)
+  [P1] Foreign requestId → 404
+
+PATCH /reject?requestId=
+  [P0] PENDING + reason → REJECTED
+  [P0] Missing body reason → 422
+  [P1] reason > 2000 → 422
+
+─── Integration with student-view ───
+  [P0] Form teacher submit → appears in admin GET /requests
+  [P1] Second pending submit same class/term → 400 (student-view guard)
+
+
+10) DB DESIGN ISSUES
+--------------------------------------------------------------------------------
+  • class_record_export_request + class_record_export_record 1:1 — clean. ✅
+  • status enum PENDING/ACCEPTED/REJECTED — workflow clear. ✅
+  • createdBy → user; classId → organisationClass — correct FKs. ✅
+  • academicTermId RESTRICT — term cannot delete while requests exist. ✅
+  • No unique (classId, academicTermId, PENDING) in DB — app enforces in
+    student-view only; race possible. 📌
+
+
+11) DB / SCHEMA OPTIMISATION
+--------------------------------------------------------------------------------
+
+class_record_export_request
+  • INDEX organizationId, academicTermId, status, createdBy — list query OK. ✅
+  • Optional composite (organizationId, academicTermId, status) for admin inbox.
+
+class_record_export_record
+  • JSONB content — consider GIN only if querying inside JSON (not today). ✅
+  • version serial — unused in API; document purpose. 📌
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0
+  1. Fix GET /requests filters: remove createdBy = formTeacherId for admin;
+     enable status PENDING for orgadmin.
+  2. accept/reject: reject unless current status is PENDING. ✅ 
+  3. Fix formTeacherName → submitterName (or correct join).
+
+P1
+  4. runWithDbContext on all handlers. ✅
+  5. @MaxLength(2000) + trim on RejectRecordDto. ✅
+  6. ROLE_ORG_ADMIN / ROLE_USER constants in service. ✅
+  7. LoggingInterceptor. ✅
+  8. e2e P0 tests for list + accept flow.
+
+P2
+  9. getRecord allow ACCEPTED for audit read.
+  10. DB partial unique on pending export per class/term. 
+  11. Response list DTOs.
+
+================================================================================
+END OF REVIEW
+================================================================================

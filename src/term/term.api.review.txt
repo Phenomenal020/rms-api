@@ -1,0 +1,333 @@
+================================================================================
+TERM API — CODE REVIEW
+Route: api/src/term  (HTTP prefix: /api/v1/terms)
+Reviewed: 2026-06-22
+Files: term.controller.ts, term.service.ts, term.module.ts, dto/term.dto.ts,
+       dto/update-term.dto.ts (orphan), term-validation.ts
+Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
+         common/interceptors/*, auth/guards/org-admin.guard.ts, app.module.ts
+Client counterpart: client/app/(main)/term/term.review.txt
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The term module manages org-scoped academic terms (create, list, patch dates/status).
+It uses OrgAdminGuard, DTO validation with ISO date checks, cross-field date
+validation in term-validation.ts, runWithDbContext on mutations, and application-
+level “single ACTIVE term” demotion on PATCH. Strengths include immutable
+academicYear/term identity, DB unique constraints aligned with business rules,
+and status workflow comments in schema.
+
+Main gaps: (1) createTerm calls requireOwnerOrganizationId(member.role === 'owner')
+    but org admins use member.role === 'orgadmin' — POST likely 401 for real
+    admins; (2) success: string responses double-wrap via ResponseTransformInterceptor;
+    (3) getTerms uses unbounded member join (multi-org leak) vs requireOrganizationId
+    on mutations; (4) updateTerm sets updateData.id = termId and breaks empty-body
+    guard; (5) duplicate UpdateTermDto in update-term.dto.ts (unused); (6) no
+    runWithDbContext on GET; (7) no LoggingInterceptor; (8) create returns data: null
+    (no new term id). Database design for academic_term is strong (unique year+slot,
+    partial unique ACTIVE, CHECK term_start < term_end).
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • App-wide: requestId, requestLogger, helmet, 100 kb JSON limit. ✅
+  • TermModule has no module-level middleware — correct.
+
+How middleware applies to /api/v1/terms
+  A) Request ID + logging (app-wide) ✅
+  B) Body size (app-wide) ✅ — term payloads are small.
+  C) Rate limiting (optional) 📌 — POST/PATCH are low-frequency admin actions;
+     optional mutation rate limit if abuse is a concern.
+  D) No term-specific middleware needed.  ✅
+
+What NOT to put in middleware
+  • Org / term resolution — requireOrganizationId / requireOwnerOrganizationId in service.
+  • Date validation — term-validation.ts + DTO.
+  • Auth — global AuthGuard + OrgAdminGuard.
+
+
+2) EXCEPTION FILTERS — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+How they work (this project)
+  • AllExceptionsFilter global; runWithDbContext maps PG errors on mutations.
+
+Term-specific usage today
+  • createTerm / updateTerm use runWithDbContext('term', ...). ✅
+  • getTerms has no runWithDbContext — DB errors → generic 500.
+  • validateTermDates → BadRequestException before DB.
+  • NotFoundException when PATCH updates zero rows.
+
+Mapped errors (postgres-error.mapper.ts)
+  • 23505 + 'term' → 409 "A term with this academic year and term slot already exists"
+  • 23503 — no term-specific branch (term delete not exposed)
+
+Improvements
+  A) Wrap getTerms in runWithDbContext('term', ...).
+     FIX: getTerms wrapped in runWithDbContext('term', 'Failed to fetch terms', ...). ✅
+  B) Standardise success: true (boolean) — fix double-wrap (§5).
+     FIX: getTerms, createTerm, and updateTerm return { success: true, data }. ✅
+  C) Map 23503 if DELETE term is added later (blocked by assignments/enrollments).
+     FIX: postgres-error.mapper case 'term' for 23503. ✅
+  D) TermsExceptionFilter — optional, low priority.
+
+
+3) PIPES — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+Current usage
+  • CreateTermDto, UpdateTermDto, PatchTermParamsDto on POST/PATCH. ✅
+  • Global ValidationPipe with whitelist, transform, 422.
+
+Gaps and recommendations
+
+  A) Duplicate UpdateTermDto (medium)
+     dto/update-term.dto.ts duplicates term.dto.ts UpdateTermDto with an extra
+     @IsUUID() id field — controller imports from term.dto.ts only. Delete orphan
+     file or consolidate.
+     FIX: Deleted file ✅
+
+  B) @MaxLength on academicYear (medium)
+     Schema varchar(16). DTO has @MinLength(1) but no @MaxLength(16).
+     FIX: Added maxlength 16 ✅
+
+  C) PATCH partial date validation (medium)
+     validateTermDates only sees fields in the PATCH body. Updating termStart alone
+     does not compare against existing termEnd in DB (and vice versa). Options:
+     load current row in service or reject partial date-only PATCH without both.
+     FIX: To be reviewed... 📌
+
+  D) @IsInt on termDays — OK with transform. ✅
+
+  E) status enum — @IsIn matches schema enum. ✅
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+Guard execution order
+  1. Global AuthGuard
+  2. OrgAdminGuard on TermController
+  3. Handler
+
+Current state — adequate for org-admin term management ✅
+
+  A) createTerm vs requireOwnerOrganizationId (high — bug)
+     Controller allows orgadmin (session user.role). Service create uses
+     requireOwnerOrganizationId which queries member.role === 'owner'. Schema and
+     Better Auth use member.role === 'orgadmin'. POST /terms likely fails with
+     401 for legitimate school admins.
+
+     Fix: use requireOrganizationId (match updateTerm) OR change helper to
+     accept orgadmin owner role. ✅
+
+  B) TermStatusGuard (medium)
+     Should ARCHIVED terms reject further PATCH? Should only DRAFT → ACTIVE be
+     allowed from UI? Enforce in service if product requires.
+     FIX: Yes, business logic ✅
+
+  C) requireActive on downstream modules — classes/assessment use
+     requireTermInOrganization; term module itself does not require active for
+     setup edits — OK for term setup page.
+
+
+5) INTERCEPTORS — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+Current state
+  • Global TimeoutInterceptor + ResponseTransformInterceptor.
+  • No LoggingInterceptor on TermController.
+
+  A) ResponseTransformInterceptor (high)
+     Service returns success: 'Terms fetched successfully' (string). Interceptor
+     only recognises success === true → double-wrap:
+       { success: true, data: { success: '...', data: terms } }
+     Client getTerms() uses data.data — may receive inner envelope not array.
+
+     Fix: return { success: true, data: terms } on all handlers. 
+     FIX: Modified to return success: true ✅
+
+  B) LoggingInterceptor (medium) ✅
+  C) TimeoutInterceptor (low) ✅ global 15 s
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request DTOs
+
+  | DTO               | Used on           | Issues |
+  |-------------------|-------------------|--------|
+  | CreateTermDto     | POST /terms       | Good ISO dates, enum; no @MaxLength(16) on academicYear | ✅
+  | UpdateTermDto     | PATCH /terms/:id  | True PATCH optional fields ✅ |
+  | PatchTermParamsDto| PATCH /terms/:id  | @IsUUID ✅ |
+  | update-term.dto.ts| (unused)          | Duplicate — remove | ✅
+
+Response DTOs — missing
+  • GET returns term rows including organizationId (internal; OK for admin).
+  • POST/PATCH return data: null — client cannot get new term id without refetch.
+  • Recommend TermListItemDto / CreateTermResponseDto { id }.
+
+
+7) CODE QUALITY — What could be improved?
+--------------------------------------------------------------------------------
+
+Strengths
+  • Clear immutable vs mutable field split (academicYear, term vs dates, status). ✅
+  • ACTIVE demotion logic in updateTerm transaction. ✅
+  • validateTermDates shared for create/update. ✅
+  • DB CHECK + unique indexes mirror business rules. ✅
+
+Issues
+
+  A) requireOwnerOrganizationId / orgadmin mismatch (high) — §4A ✅
+  B) Response envelope string success (high) — §5A ✅
+  C) getTerms member join (high) — same pattern fixed in subjects; use
+     requireOrganizationId + filter academicTerm.organizationId  ✅
+  D) updateData.id = termId in PATCH (high)
+     - Pollutes .set() with PK
+     - Object.keys(updateData).length never 0 → "No fields to update" dead code
+     Remove id from updateData; check mutable keys only.
+     FIX: removed id from updateData; empty-body guard now applies to mutable fields only. ✅ 
+  E) Controller comment "Returns null when no terms" — GET returns { data: [] } ✅
+  F) Unnecessary transaction on create (single INSERT) — low ✅
+  G) No LoggingInterceptor — low ✅
+  H) createTerm no .returning() — low UX ✅
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+  | Scenario                         | Current              | Recommended |
+  |----------------------------------|----------------------|-------------|
+  | Duplicate year+term slot         | 409 via mapper       | OK ✅ |
+  | Two ACTIVE terms                 | DB partial unique + app demotion | OK ✅ |
+  | termEnd <= termStart             | 400 validateTermDates| OK ✅ |
+  | Invalid ISO date in DTO          | 422                  | OK ✅ |
+  | PATCH term other org             | 404                  | OK ✅ |
+  | Empty PATCH body                 | Should 400; today may UPDATE id only | Fix id in updateData | Fixed ✅
+  | Orgadmin POST create             | 401 owner check      | requireOrganizationId | Fixed ✅
+  | getTerms DB failure              | Generic 500          | runWithDbContext | Fixed ✅
+  | Double-wrapped GET response      | Client list broken   | success: true | Fixed ✅
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+─── TermController (e2e) ───
+
+Auth
+  [P0] GET /terms without session → 401
+  [P0] GET /terms as teacher → 401
+  [P0] GET /terms as orgadmin → 200
+
+GET /terms
+  [P0] No terms → 200, data: [] (after envelope fix)
+  [P0] Multiple terms → ordered by createdAt desc
+  [P1] Multi-org member → scoped to one org after GET fix
+  [P2] Response shape not double-wrapped
+
+POST /terms
+  [P0] Valid create as orgadmin → 201 (after owner fix)
+  [P0] Duplicate academicYear+term → 409
+  [P0] termEnd before termStart → 400
+  [P1] Invalid ISO date → 422
+  [P1] Whitespace academicYear → 422
+  [P1] orgadmin with member.role orgadmin (not owner) → 201 not 401
+  [P2] Returns created term id (future)
+
+PATCH /terms/:id
+  [P0] Update termDays → 200
+  [P0] Set status ACTIVE → demotes other ACTIVE terms
+  [P0] Invalid UUID → 422
+  [P0] Foreign term id → 404
+  [P1] Empty body → 400 "No fields to update" (after id fix)
+  [P1] Partial termStart only with end before start in DB → document behaviour
+  [P1] ARCHIVED → ACTIVE allowed? (product)
+  [P2] Concurrent ACTIVE switches → one ACTIVE remains
+
+─── TermService (unit) ───
+  [P1] validateTermDates edge cases
+  [P1] ACTIVE demotion SQL only touches same org
+
+─── DTO / mapper ───
+  [P1] CreateTermDto rejects invalid term enum
+  [P1] 23505 term context message
+
+
+10) DB DESIGN ISSUES (given business logic)
+--------------------------------------------------------------------------------
+  • Term identity = (organizationId, academicYear, term) — matches API immutability. ✅
+  • One ACTIVE per org — partial unique index + service demotion. ✅
+  • CASCADE on gradingEntry / assessmentStructure when term deleted — but term
+    DELETE not exposed; RESTRICT from assignments/enrollments blocks delete. ✅
+  • templateSchema / templateUrl on term — pro feature; not in API yet. 📌
+  • Status workflow DRAFT/ACTIVE/ARCHIVED — score locking implied; enforce in
+    record/assessment modules when ARCHIVED. 📌
+
+
+11) DB / SCHEMA OPTIMISATION (schema.ts — academic_term)
+--------------------------------------------------------------------------------
+
+academic_term
+  • UNIQUE (organizationId, academicYear, term) — matches 409 mapper. ✅
+  • partial UNIQUE (organizationId) WHERE status = 'ACTIVE' — belt + suspenders. ✅
+  • CHECK term_start < term_end — DB enforces; service validates too. ✅
+  • INDEX (organizationId), (organizationId, status) — good for list + active lookup.
+  • FK organizationId ON DELETE RESTRICT — OK.
+  • ON DELETE CASCADE to grading_entry, assessment_structure.
+  • ON DELETE RESTRICT from subject_class_assignment, student_subject_enrollment.
+
+Cascade summary
+  • Delete term with class assignments → BLOCKED (23503).
+  • Delete org → BLOCKED by RESTRICT chain.
+
+Optional hardening
+  • CHECK academic_year length / trim.
+  • Index INCLUDE (academic_year, term, status) for list hot path at scale.
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0
+  1. Fix createTerm: requireOrganizationId (not owner-only) or fix owner role string.
+  2. success: true on all service returns.
+  3. Remove updateData.id from PATCH; fix empty-body guard.
+  4. Fix getTerms org scoping (requireOrganizationId + direct filter).
+
+P1
+  5. runWithDbContext on getTerms.
+  6. Delete dto/update-term.dto.ts duplicate.
+  7. @MaxLength(16) on academicYear.
+  8. Partial date PATCH vs existing row validation.
+  9. LoggingInterceptor on controller.
+  10. term e2e P0 tests.
+
+P2
+  11. Return created id from POST.
+  12. Term response DTOs.
+  13. ARCHIVED term edit policy.
+
+================================================================================
+END OF REVIEW
+================================================================================

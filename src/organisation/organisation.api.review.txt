@@ -1,0 +1,255 @@
+================================================================================
+ORGANISATION API — CODE REVIEW
+Route: api/src/organisation  (HTTP: /api/v1/organisation)
+Reviewed: 2026-06-22
+Files: organisation.controller.ts, organisation.service.ts,
+       organisation.module.ts, organisation.dto.ts
+Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
+         common/interceptors/*, auth/guards/org-admin.guard.ts,
+         @thallesp/nestjs-better-auth (AuthService.addMember)
+Client counterpart: client/fetcher/queries.ts (dashboard), mutations.ts (add-member),
+                   client/app/(main)/teachers/*, dashboard cards
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The organisation module exposes two org-admin endpoints: GET dashboard stats
+(enrolled students, subjects, pending/accepted record-export counts) and POST
+add-member (resolve email → userId → Better Auth organisation.addMember).
+
+Strengths: OrgAdminGuard on controller; dashboard uses requireOrganizationId and
+parallel counts; dashboard already returns success: true.
+
+Main gaps: (1) addMember does not receive admin userId — no org scoping before
+BA call; (2) addMember returns success: string (double-wrap risk); (3) BA
+addMember called without session/headers — may not attach member to caller's org;
+(4) no runWithDbContext on either handler; (5) controller method misnamed
+saveOrganisation; (6) POST returns 200 not 201; (7) no LoggingInterceptor;
+(8) duplicate overlap with teacher-invitation module addMember.
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • App-wide requestId, requestLogger, helmet, 100 kb JSON limit. ✅
+  • No module middleware — correct.
+
+Recommendations
+  A) App-wide middleware sufficient. ✅
+  B) Optional rate limit on POST add-member (abuse: enumerate emails). 📌
+
+What NOT to put in middleware
+  • Email → user lookup — service concern.
+  • Better Auth addMember — service with admin session context.
+
+
+2) EXCEPTION FILTERS — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • Neither handler uses runWithDbContext.
+  • addMember catches unknown errors → generic BadRequestException.
+  • getDashboard: DB errors → unhandled 500.
+
+Mapped errors
+  • No 'organisation' context in postgres-error.mapper.
+  • addMember duplicate member likely surfaces as BA error → swallowed as 400.
+
+Improvements
+  A) runWithDbContext on getDashboard (generic or new 'organisation' context). ✅
+  B) addMember: map BA conflict/duplicate to 409 with clear message. ✅
+  C) Standardise addMember success: true (boolean). ✅
+
+
+3) PIPES — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • AddMemberDto: @IsEmail @IsNotEmpty on email. ✅
+
+Gaps
+  A) @Transform(trim) + @MaxLength on email — normalize whitespace. ✅
+  B) Commented organizationId in DTO — remove dead code or document why omitted. ✅
+  C) No response DTO for dashboard shape — typing only in client. 📌
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+  • OrgAdminGuard on entire controller — appropriate for both routes. ✅
+  • addMember should also verify admin belongs to an org (requireOrganizationId)
+    before BA call — currently missing. ✅
+
+  A) Pass session.user.id into addMember service — scope to admin's school. ✅
+  B) Do not expose whether email exists to non-admins — OK (admin-only). ✅
+  C) Consider UserGuard + invite flow for teachers without accounts — separate
+     from add-member (teacher-invitation module). 📌
+     (To be implemented later. For now, orgadmin should tell teachers manually OUTSIDE the app. Consider a referral flow)
+
+
+5) INTERCEPTORS — General use and improvements
+--------------------------------------------------------------------------------
+
+  A) ResponseTransformInterceptor
+     • getDashboard: success: true — passes through. ✅
+     • addMember: success: 'Member added to organisation' (string) → double-wrap. 📌
+
+  B) LoggingInterceptor (medium)✅
+  C) TimeoutInterceptor — global OK. ✅
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request
+  | DTO          | Used on                    | Notes |
+  |--------------|----------------------------|-------|
+  | AddMemberDto | POST /organisation/add-member | email only |
+
+Response — missing
+  • DashboardStatsDto { enrolledStudents, subjectsOffered, pendingRequests,
+    approvedRequests }.
+  • addMember returns data: null — client refetches org members list. OK.
+
+Naming
+  • Controller handler saveOrganisation → rename addMember. ✅
+
+
+7) CODE QUALITY
+--------------------------------------------------------------------------------
+
+Strengths
+  • getDashboard parallel Promise.all for four counts. ✅
+  • countRows helper — DRY for aggregates. ✅
+  • addMember email lookup with admin-facing NotFound message. ✅
+
+Issues
+
+  A) addMember(payload) — no admin userId parameter (high)
+     Controller has session but does not pass session.user.id. Cannot call
+     requireOrganizationId; BA may not know which org to add to.
+     FIXED: Scoped addMember to authenticated user's id ✅
+
+  B) success: string on addMember (high) ✅
+
+  C) (authService.instance as any).api.addMember — untyped BA call (medium)
+     Fragile; no headers/session forwarding documented.
+
+  D) getDashboard no runWithDbContext (medium) FIXED ✅
+
+  E) POST add-member @HttpCode(200) — REST prefers 201 for create (low) FIXED ✅
+
+  F) Overlap with teacher-invitation.service addMember (low)
+     organisation module has fuller email lookup; teacher-invitation has TODO.
+     Consolidate one implementation. 
+     FIX: Removed teacher-invitation service ✅
+
+  G) No LoggingInterceptor (low) ✅
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+  | Scenario                         | Current              | Recommended |
+  |----------------------------------|----------------------|-------------|
+  | Dashboard DB failure             | Generic 500          | runWithDbContext | ✅
+  | Email not registered             | 404 NotFound         | OK ✅ |
+  | BA addMember fails               | 400 generic          | Map BA codes | ✅
+  | Member already in org            | 400 generic          | 409 Conflict | ✅
+  | Admin has no org                 | N/A (not checked)    | requireOrganizationId | ✅
+  | Double-wrapped addMember response| string success       | success: true | ✅
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+─── Controller (e2e) ───
+
+Auth
+  [P0] GET /dashboard without session → 401
+  [P0] POST add-member without session → 401
+  [P0] GET as orgadmin → 200 with four numeric fields
+  [P0] POST as teacher (user role) → 401
+
+GET /dashboard
+  [P0] Returns counts scoped to admin's org only
+  [P1] Zero students → enrolledStudents: 0
+  [P1] Admin with no org membership → 403
+
+POST /add-member
+  [P0] Valid email of existing user → 200/201, member in org
+  [P0] Unknown email → 404 with helpful message
+  [P1] Email already member → 409
+  [P1] Invalid email format → 422
+  [P2] Email with leading/trailing spaces → trimmed or 422
+
+─── Service (unit) ───
+  [P0] getDashboard uses organisationId from requireOrganizationId
+  [P1] countRows returns 0 when no rows
+
+
+10) DB DESIGN ISSUES
+--------------------------------------------------------------------------------
+  • Dashboard reads student, subject, class_record_export_request by
+    organizationId — correct denormalised scoping. ✅
+  • member table: unique orgadmin per org — only one admin; add-member adds
+    teachers (role user). ✅
+  • No organisation profile PATCH in this module — school settings may live in
+    Better Auth org plugin elsewhere. ✅
+
+
+11) DB / SCHEMA OPTIMISATION
+--------------------------------------------------------------------------------
+
+student / subject / class_record_export_request
+  • INDEX organizationId on all three — dashboard counts efficient. ✅
+  • class_record_export_request INDEX status — pending count OK. ✅
+
+Optional
+  • Partial index on class_record_export_request (organizationId) WHERE
+    status = 'PENDING' if pending count is hot path at scale.
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0
+  1. Pass session.user.id to addMember; requireOrganizationId before BA call. ✅
+  2. addMember success: true (boolean). ✅
+  3. Forward admin session/headers to BA addMember so member joins correct org. ✅
+
+P1
+  4. runWithDbContext on getDashboard. ✅
+  5. Map duplicate-member errors to 409. ✅
+  6. Rename controller handler saveOrganisation → addMember. ✅
+  7. LoggingInterceptor. ✅
+
+P2
+  8. POST → 201 for add-member. ✅
+  9. Consolidate with teacher-invitation addMember. ✅
+  10. DashboardStatsDto / OpenAPI types. 📌
+
+================================================================================
+END OF REVIEW
+================================================================================

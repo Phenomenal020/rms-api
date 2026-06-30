@@ -1,0 +1,668 @@
+================================================================================
+CLASSES API — CODE REVIEW
+Route: api/src/classes
+Reviewed: 2026-06-09
+Files: classes.controller.ts, classes.service.ts, classes.module.ts, dto/class.dto.ts
+Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
+         auth/guards/org-admin.guard.ts, app.module.ts, main.ts
+Client counterpart: client/app/(main)/classes/classes.review.txt
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The classes module is well-structured for a NestJS + Drizzle stack: org-scoped
+reads in transactions, batch loading to avoid N+1, diff-based subject sync on
+update, and reuse of shared infra (OrgAdminGuard, global ValidationPipe,
+AllExceptionsFilter, runWithDbContext). The main gaps are inconsistent response
+envelopes, DTO/service contract mismatches (especially around activeTermId and
+PATCH semantics), missing term ownership validation (used elsewhere in the API),
+no response DTOs or interceptors, and an update path that can touch subject
+assignments without proving the class exists. Database design is generally sound
+for the org-level class / term-level subject-assignment model, but cascade and
+cross-table integrity rely heavily on application code.
+
+
+1) MIDDLEWARE — How can it be used here?
+--------------------------------------------------------------------------------
+
+Current state
+  • Global transport middleware in main.ts: helmet().
+  • ClassesModule has no module-level middleware.
+  • No request-id is attached today, so AllExceptionsFilter cannot include one.
+
+How middleware applies to /api/v1/classes
+  Middleware runs before guards, pipes, and the controller. It is the right
+  layer for cross-cutting transport concerns that do not need DI or route
+  handler context:
+
+  A) Request ID (recommended, app-wide)
+     Attach a correlation id before any route handler runs. AllExceptionsFilter
+     already reads request.requestId — middleware just needs to populate it.
+
+       // middlewares/request-id.middleware.ts
+       export function requestId(req, res, next) {
+         const id = req.headers['x-request-id'] ?? crypto.randomUUID();
+         req.requestId = id;
+         res.setHeader('X-Request-Id', id);
+         next();
+       }
+
+     Wire in AppModule.configure() for all routes (including Better Auth). ✅
+
+  B) Request logging / latency (recommended, app-wide)
+     Log method, path, status, durationMs on res.on('finish'). Classes endpoints
+     are write-heavy on PATCH (subject diff); latency logging helps spot slow
+     transactions without instrumenting the service. ✅
+
+  C) Rate limiting (optional, route-scoped)
+     POST /classes and PATCH /classes/:id perform multi-statement transactions.
+     If abuse is a concern, apply a stricter rate limit to mutation routes:
+
+       consumer
+         .apply(mutationRateLimiter)
+         .forRoutes(
+           { path: 'classes', method: RequestMethod.POST },
+           { path: 'classes/:id', method: RequestMethod.PATCH },
+         );   📌
+
+  D) Body size guard (optional)
+     Subject assignment arrays are unbounded in the DTO. A middleware (or Nest
+     body-parser limit in main.ts) can reject oversized JSON before it reaches
+     the service.
+     FIX: Added a json limit of 100kb in main.ts ✅
+
+What NOT to put in middleware for this route
+  • Org resolution (requireOrganizationId) — needs DB; belongs in service or a custom guard/interceptor with DI.
+  • Term validation — same; use requireTermInOrganization helper (already used in assessment-structure, grading-system, record modules).
+  • Auth — already handled by global AuthGuard + OrgAdminGuard.
+
+
+2) EXCEPTION FILTERS — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+How they work in NestJS (and in this project)
+  • Exception filters catch thrown errors after the route pipeline runs.
+  • @Catch() scope: method, controller, or global.
+  • This API registers AllExceptionsFilter globally in main.ts.
+  • Flow: HttpException → status + body from exception; Postgres errors →
+    mapPostgresError(); everything else → 500 + logged stack.
+
+Classes-specific usage today
+  • createClass and updateClass wrap mutations in runWithDbContext('class', ...).
+    That helper re-throws HttpException, maps PG codes 23505/23503 via
+    postgres-error.mapper.ts, else InternalServerErrorException.
+  • getClasses and getSubjectClassAssignments do NOT use runWithDbContext —
+    unexpected DB errors bubble to AllExceptionsFilter as generic 500s.
+  • Service throws BadRequestException, NotFoundException explicitly.
+
+Mapped errors relevant to classes
+  • 23505 + context 'class' → 409 Conflict
+    "A class with this name already exists in your school"
+  • 23503 + context 'class' → 400 BadRequest
+    "Cannot remove subject(s) from this class because students are already
+    enrolled..."
+
+Improvements
+
+  A) Use runWithDbContext (or equivalent try/catch) on read paths too
+     getClasses runs a transaction; a connection failure should not rely on the
+     generic 500 path. Wrap the transaction the same way as mutations.
+     FIX: getClasses and getSubjectClassAssignments wrapped in runWithDbContext;
+     enrollments reads also run in a single transaction. ✅
+
+  B) Add a ClassesExceptionFilter (optional, low priority)
+     Only needed if you want domain-specific error shapes, e.g.:
+
+       { statusCode: 409, code: 'CLASS_NAME_TAKEN', message: '...' }
+
+     Otherwise the global filter + postgres-error.mapper is sufficient. 📌
+
+  C) Extend postgres-error.mapper for class edge cases
+     • 23505 on subject_class_assignment unique
+       (organisationClassId, subjectId, academicTermId) — duplicate subjectIds
+       in one payload currently hits this as a generic or unmapped error.
+     • 23503 on form_teacher_id FK if user deleted but still referenced.
+     FIX: Mapper branches on constraint — subjectClassAssignment duplicate → 409;
+     form_teacher_id FK → 400 with a clear message. ✅
+
+  D) Consistent NotFound vs empty semantics
+     getClasses → { success: true, data: [] } when no classes.
+     getSubjectClassAssignments → 404 when no classes.
+     Pick one convention (prefer empty list for list endpoints) and document it.
+     FIX: getSubjectClassAssignments returns 200 + data: [] when no classes ✅
+
+
+3) PIPES — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+How pipes work
+  • Pipes transform and/or validate inputs before the handler runs.
+  • Global ValidationPipe (main.ts): whitelist, forbidNonWhitelisted, transform,
+    stopAtFirstError, 422 on validation failure.
+
+Current usage in classes
+  • @Query() GetClassesQueryDto / GetClassEnrollmentsQueryDto
+  • @Body() createClassDto / updateClassDto
+  • @Param() PatchClassParamsDto
+  • All rely on the global pipe; no route-specific pipes.
+
+Gaps and recommendations
+
+  A) subjectIds element validation (high)
+     subjectIds?: string[] has @IsArray() but no @IsUUID('4', { each: true }).
+     Invalid IDs reach the service and fail with a vague 400 after a DB round-
+     trip. Fix in DTO:
+
+       @IsOptional()
+       @IsArray()
+       @IsUUID('4', { each: true })
+       subjectIds?: string[];
+       FIX: Intentional as subjectIds not uuid (Would be fixed later 📌)
+
+  B) updateClassDto should be a true PATCH DTO (high)
+     All body fields are required today, but the service uses
+     `if (data.name !== undefined)` PATCH semantics. Align with subjects module
+     intent (UpdateSubjectDto comment): mark name, formTeacherId, activeTermId,
+     subjectIds as @IsOptional(). Only validate format when present.
+     Todo: 📌
+
+  C) createClassDto activeTermId contradiction (high)
+     DTO: activeTermId required (@IsUUID).
+     Service: only required when subjectIds.length > 0.
+     Client must send a dummy term id to create a class without subjects, or
+     validation fails before the service runs. Fix:
+
+       @IsOptional()
+       @IsUUID()
+       activeTermId?: string;
+
+     Keep the service guard for subject assignment.
+     FIX: Intentionally left this way for future changes ✅
+
+  D) formTeacherId validation pipe (medium)
+     Replace magic string "Not Assigned" with @IsOptional() @ValidateIf and
+     either null or @IsUUID(). Consider a custom pipe:
+
+       FormTeacherIdPipe — maps null/undefined → null, validates UUID otherwise.
+       FIX: Leave as is for now ✅
+
+  E) ParseUUIDPipe on :id (low)
+     @Param('id', ParseUUIDPipe) is an alternative to PatchClassParamsDto;
+     current DTO approach is fine and consistent with subjects/term modules.
+     FIX: Leave as is ✅
+
+  F) Custom validation pipe for duplicate subjectIds (medium)
+     @ArrayUnique() on subjectIds prevents redundant inserts and unique
+     constraint violations.
+     FIX: Added unique constraint on each subject ✅
+
+  G) Term ownership validation pipe (high — security)
+     Create a TermBelongsToOrgPipe or call requireTermInOrganization in service
+     whenever activeTermId / termId is used. Other modules already do this;
+     classes does not, so a UUID from another school could be accepted until FK
+     fails (or worse, if IDs ever collide across tenants in tests).
+     FIX: requireTermInOrganization in classes.service on getClasses (when termId
+     provided), getSubjectClassAssignments, createClass (with subjects), and
+     updateClass (when activeTermId provided). ✅
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+Guard execution order (this app)
+  1. Global AuthGuard (APP_GUARD) — session must exist
+  2. OrgAdminGuard (@UseGuards on ClassesController) — user.role === orgadmin
+  3. Handler
+
+Current state — adequate for admin-only CRUD
+  • All four endpoints require org admin.
+  • Unauthorized responses are deliberately generic (no resource leakage).
+
+Possible additions
+
+  A) ActiveOrganisationGuard (medium)
+     requireOrganizationId reads member.organizationId for the user. If Better Auth supports multiple org memberships and session.activeOrganizationId, validate that the resolved org matches the session's active org.
+      Todo: 📌
+
+  B) TermStatusGuard for mutations (medium)
+     Business rule: should subject assignments be editable only on ACTIVE
+     terms? If yes, add a guard or service check using
+     requireTermInOrganization(db, userId, termId, { requireActive: true })
+     on create (with subjects) and update (with subjectIds).
+     FIX: requireActive: true on createClass (with subjectIds) and updateClass
+     (when activeTermId provided for subject sync). ✅
+
+  C) TeacherRoleGuard for formTeacherId (low)
+     Form teacher validation checks membership, not role. If only teachers
+     (not admins) may be form teachers, add role check on member.role.
+     FIX: requireFormTeacherMember in org-context.helper — member.role must be
+     user (teacher); used on createClass and updateClass. ✅
+
+  D) Do NOT add guards for org scoping on reads
+     Organisation scoping belongs in the service WHERE clauses (already done). ✅
+
+
+5) INTERCEPTORS — General use and improvements for this route
+--------------------------------------------------------------------------------
+
+Current state
+  • No interceptors anywhere in api/src.
+  • Response shaping is manual in the service ({ success, data }).
+
+How interceptors could help
+
+  A) ResponseTransformInterceptor (high — consistency)
+     Standardise all API responses:
+
+       { success: boolean, data: T, message?: string }
+
+     Today updateClass returns success: 'Class updated successfully' (string)
+     while createClass returns success: true (boolean). An interceptor
+     eliminates per-method drift.
+     FIX: Added a response transform interceptor globally based on a skip response transform decorator ✅
+
+  B) LoggingInterceptor (medium)
+     Log userId, route, duration, and row counts after handler completion.
+     Complements middleware (which lacks session user).
+     FIX: Added a logging interceptor to the /classes route ✅
+
+  C) TimeoutInterceptor (medium)
+     updateClass can run several queries in one transaction. A 10–15s timeout
+     prevents hung connections on large subject lists.
+    FIX: Added a timeout interceptor globally based on a timeout ms decorator ✅
+
+  D) CacheInterceptor (low)
+     GET /classes is term-scoped and changes on PATCH. HTTP caching is risky
+     unless keyed by org + term + etag. Prefer client SWR; skip server cache
+     unless you add explicit invalidation.
+
+  E) ClassSerializerInterceptor (low)
+     Only relevant once response DTOs use @Exclude() for internal fields.
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request DTOs (dto/class.dto.ts)
+
+  | DTO                        | Used on              | Issues |
+  |----------------------------|----------------------|--------|
+  | GetClassesQueryDto         | GET /classes         | termId optional — OK; no @Transform(trim) on UUID |
+  | GetClassEnrollmentsQueryDto| GET /classes/enrollments | termId required — OK |
+  | createClassDto             | POST /classes        | activeTermId required but shouldn't be; no UUID each on subjectIds; PascalCase name inconsistent with CreateSubjectDto |
+  | updateClassDto             | PATCH /classes/:id   | All fields required — wrong for PATCH; same subjectIds gap |
+  | PatchClassParamsDto        | PATCH /classes/:id   | Good |
+
+  Naming: rename createClassDto → CreateClassDto, updateClassDto →
+  UpdateClassDto for consistency with subjects/term modules.
+
+Response DTOs — missing entirely
+
+  Recommended response types (for typing, OpenAPI, and interceptors):
+
+  // GET /classes
+  class ClassListItemDto {
+    id: string;
+    name: string;
+    formTeacher: FormTeacherDto | null;
+    subjects: SubjectSummaryDto[];
+  }
+
+  // GET /classes/enrollments
+  class ClassEnrollmentDto {
+    classId: string;
+    name: string;
+    assignments: { assignmentId: string; subjectId: string; subjectName: string }[];
+  }
+
+  // POST /classes — consider returning created id
+  class CreateClassResponseDto {
+    success: true;
+    data: { id: string } | null;
+  }
+
+  // PATCH /classes/:id
+  class UpdateClassResponseDto {
+    success: true;
+    message?: string;
+    data: null;
+  }
+  FIX: On Second thoughts, I do not think these are necessary for now 📌
+
+  Use class-transformer @Expose() if you adopt ClassSerializerInterceptor.
+
+  createClass returns data: null — client must refetch to get the new id.
+  Returning { id: newClass.id } from .returning() would improve UX and tests.  
+  FIX: Returned id now ✅
+
+
+7) CODE QUALITY — What could be improved?
+--------------------------------------------------------------------------------
+
+Strengths
+  • Clear separation: controller (HTTP) vs service (business + DB).
+  • getClasses uses a single transaction and batch form-teacher load.
+  • updateClass diff algorithm (toDelete / toInsert) is correct and readable.
+  • Org scoping on UPDATE via WHERE organizationId avoids extra ownership SELECT.
+  • Comments explain non-obvious behaviour (empty array vs 404, diff cases).
+
+Issues
+
+  A) Response envelope inconsistency (high)
+     • getClasses / getSubjectClassAssignments / createClass: success: true
+     • updateClass: success: 'Class updated successfully' (string)
+     Standardise on boolean success + optional message field.
+     FIX: Standardised the responses + incorporated response interceptors ✅
+
+  B) DTO / service contract mismatch (high)
+     See sections 3 and 6. ValidationPipe and service logic disagree on
+     activeTermId and PATCH optionality.
+     FIX: Intentional (for now...) ✅
+
+  C) Magic sentinel "Not Assigned" (medium)
+     Used in service and likely mirrored on client. Prefer null in API contract;
+     map to null in DB. Reduces special-case string handling.
+     FIX: Intentional (for now...) ✅
+
+
+  D) Route declaration order (low)
+     @Get('enrollments') is declared after @Patch(':id'). No bug today (different methods), but move static GET paths above param routes for safety if @Get(':id') is added later.
+     FIX: Moved above the dynamic routes ✅
+
+  E) Duplicate type inside service (low)
+     SubjectAssignmentDto in getSubjectClassAssignments should live in dto/.
+    FIX: Moved to dto file ✅
+
+  F) updateClass ownership gap (high)
+     If classUpdateData is empty (future optional PATCH) but activeTermId and
+     subjectIds are sent, subject sync runs without verifying the class exists
+     in the org. Add an existence check at the start of the transaction:
+
+       SELECT id FROM class WHERE id = ? AND organization_id = ?
+
+  G) requireTermInOrganization not used (high)
+     Inconsistent with assessment-structure, grading-system, record modules.
+     FIX: Wired in classes.service — see Pipes §G. ✅
+
+  H) Name normalisation (medium)
+     toLowerCase() on name may surprise users ("Grade 10A" display). Consider trim + case-insensitive unique index (citext) instead of storing lowercase.
+     FIX: Removed name normalisation ✅
+
+  I) TODO in updateClass (medium)
+     "Too many DB calls" — update performs: org lookup, optional form teacher
+     check, update, fetch assignments, delete, validate subjects, insert. Could
+     combine existence + fetch assignments in one query.
+      Todo: To be implemented later... 📌
+
+  J) getSubjectClassAssignments not in a transaction (low)
+     Classes list and assignments could be momentarily inconsistent under
+     concurrent writes. Wrap in tx like getClasses.
+     FIX: Wrapped the db call in a tx ✅
+
+  K) Module exports (low)
+     ClassesService is not exported. Export if other modules (e.g. enrollment,
+     record) need shared class logic later.
+     FIX: Added ClassesService to the exports array ✅
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+What works
+  • Explicit domain errors with appropriate HTTP types.
+  • Mutation paths use runWithDbContext for PG mapping.
+  • FK violation on subject removal maps to actionable enrollment message.
+
+Gaps
+
+  | Scenario                              | Current behaviour              | Recommended |
+  |---------------------------------------|--------------------------------|-------------|
+  | Duplicate class name                  | 409 via mapper                 | OK |
+  | Duplicate subjectIds in payload       | Likely 500 or raw PG error     | @ArrayUnique + mapper |
+  | Invalid / foreign termId              | May insert then FK fail or silent wrong scope | requireTermInOrganization |
+  | Class not found on PATCH (subjects only)| May partially succeed        | Existence check first |
+  | Form teacher not in org               | 400 — clear message            | OK |
+  | Some subjects invalid                 | 400 — clear message            | OK |
+  | User has no org                       | 401/403 via requireOrganizationId | OK |
+  | Non-admin user                        | 401 via OrgAdminGuard          | OK |
+  | getClasses DB failure                 | Generic 500                    | runWithDbContext |
+  | Empty termId on enrollments           | 400                            | OK |
+  | No classes on enrollments             | 404                            | Consider 200 + [] |
+  FIXED: ✅
+
+  Validation errors: global pipe returns 422 with class-validator messages —
+  ensure client displays them (see client classes.review.txt).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+No classes.spec.ts exists (only app.controller.spec.ts in the project).
+Below: unit tests (service, mocked DB) and e2e tests (supertest + test DB).
+
+─── ClassesController (e2e / integration) ───
+
+Auth & authorization
+  [P0] GET /classes without session → 401
+  [P0] GET /classes as non-orgadmin teacher → 401
+  [P0] GET /classes as orgadmin with valid session → 200
+
+GET /classes?termId=
+  [P0] Org with no classes → 200, { success: true, data: [] }
+  [P0] Org with classes, valid termId → 200, subjects populated per class
+  [P1] Missing termId → 200, classes returned with subjects: [] for each
+  [P1] Invalid termId format → 422
+  [P1] termId from another organisation → 200 with empty subjects (today);
+       after fix with requireTermInOrganization → 404
+
+POST /classes
+  [P0] Valid name only (no subjects) → 201, class created
+  [P0] Valid name + formTeacherId (member of org) → 201
+  [P0] formTeacherId = null / omitted → 201, formTeacherId null in DB
+  [P0] formTeacherId not a member → 400
+  [P0] Duplicate name (case-insensitive) → 409
+  [P1] With subjectIds + valid activeTermId → 201, assignments created
+  [P1] With subjectIds but no activeTermId → 400
+  [P1] subjectIds contains id from another org → 400
+  [P1] subjectIds contains non-UUID → 422
+  [P1] subjectIds duplicate entries → 422 or 409
+  [P1] activeTermId from another org → 404 (after term validation added)
+  [P2] Empty name / whitespace name → 422
+  [P2] Unknown body fields → 422 (forbidNonWhitelisted)
+
+PATCH /classes/:id
+  [P0] Update name on owned class → 200
+  [P0] Update name on class in another org → 404
+  [P0] Invalid class id format → 422
+  [P0] Non-existent class id → 404
+  [P1] Replace subject set (add + remove) for term → 200, correct diff
+  [P1] Remove subject with enrolled students → 400 with enrollment message
+  [P1] Assign invalid subject id → 400
+  [P1] Omit subjectIds but send activeTermId → subjects unchanged (sync with empty payloadIds removes all — document/intend this behaviour!)
+  [P2] formTeacherId "Not Assigned" → null in DB
+  [P2] Concurrent PATCH from two admins → last write wins; no corruption
+
+GET /classes/enrollments?termId=
+  [P0] Valid term, classes exist → 200, all classes listed with assignments
+  [P1] Missing termId → 400
+  [P1] Invalid termId → 422
+  [P1] No classes in org → 404 today (document or change to [])
+  [P1] Class with zero assignments → included with assignments: []
+
+─── ClassesService (unit, mocked Drizzle tx) ───
+
+fetchFormTeachers (private — test via getClasses or extract)
+  [P1] Empty id list → empty Map
+  [P1] Multiple ids → Map with correct entries
+  [P2] Unknown id omitted from Map → formTeacher null on class row
+
+getClasses
+  [P1] classRows empty → early return { data: [] }
+  [P1] formTeacherId null → formTeacher null
+  [P1] termId blank → subjects [] without querying assignments
+
+updateClass diff logic
+  [P0] db {A,B}, payload {B,C} → delete A, insert C, keep B
+  [P0] db {}, payload {A} → insert A only
+  [P0] db {A}, payload {} → delete A (confirm this is intended product behaviour)
+
+createClass
+  [P1] subjectIds empty → no assignment insert, no term required
+  [P1] transaction rolls back on invalid subject
+
+─── DTO validation (unit) ───
+
+  [P1] createClassDto rejects blank name after trim
+  [P1] PatchClassParamsDto rejects non-UUID id
+  [P1] GetClassEnrollmentsQueryDto requires termId
+
+─── Postgres error mapper (unit) ───
+
+  [P1] 23505 + 'class' → ConflictException with class message
+  [P1] 23503 + 'class' → BadRequestException enrollment message
+
+
+10) DB DESIGN ISSUES (given business logic from the API)
+--------------------------------------------------------------------------------
+
+Domain model (as implemented)
+  • organisationClass (table: class) — org-scoped, persists across terms.
+  • subjectClassAssignment — which subjects a class offers in a given term.
+  • student.classId — current class (org-scoped, not term-scoped).
+  • studentSubjectEnrollment — term/class/subject level enrollments with scores.
+
+Alignment
+  • API correctly treats class name and form teacher as org-level attributes.
+  • Subject assignments are term-scoped — matches schema.
+
+Design concerns
+
+  A) Student class vs term scoping (medium — product/data model)
+     Students reference classId without academicTermId. If class rosters change
+     per term, classHistory JSON is the audit trail but operational queries use
+     a single classId. Ensure enrollment and reporting logic always filters by
+     term where needed (downstream modules).
+
+  B) Denormalized organizationId on subjectClassAssignment (low)
+     Correct for query performance and org-scoped indexes. No DB constraint
+     ensures assignment.organizationId matches class.organizationId and
+     subject.organizationId. Application sets all three — a trigger or
+     composite FK pattern would harden this.
+
+  C) Form teacher FK (low)
+     formTeacherId references user.id, not member.id. A user removed from the
+     org but still in user table could remain form teacher until updated.
+     ON DELETE RESTRICT on user prevents deletion; membership removal does not.
+
+  D) No class deletion endpoint (product)
+     Schema uses ON DELETE RESTRICT on subjectClassAssignment and
+     classRecordExportRequest. Deleting a class requires explicit unlinking of
+     students (SET NULL), assignments, and export requests. API has no DELETE —
+     acceptable if intentional; document lifecycle.
+
+  E) Class name uniqueness (OK)
+     unique(organizationId, name) matches service lowercasing strategy.
+
+  F) Removing subject assignments (OK)
+     RESTRICT on studentSubjectEnrollment → mapper message. Correct business
+     rule: unenrol students before unassigning subject from class.
+
+
+11) DB / SCHEMA OPTIMISATION (schema.ts)
+--------------------------------------------------------------------------------
+
+organisationClass (class)
+  • PK: text UUID default gen_random_uuid() — OK.
+  • FK organizationId → organization ON DELETE RESTRICT — OK (prevent orphan
+    classes; delete school only after cleanup).
+  • FK formTeacherId → user ON DELETE RESTRICT — OK.
+  • UNIQUE (organizationId, name) — OK; consider citext on name for case-
+    insensitive uniqueness without forcing lowercase in application code.
+  • Indexes: organizationId, formTeacherId — good for list + teacher lookup.
+
+subjectClassAssignment
+  • UNIQUE (organisationClassId, subjectId, academicTermId) — prevents duplicate
+    assignments; matches API diff logic.
+  • Indexes on organisationClassId, subjectId, organizationId, academicTermId —
+    good for getClasses join and enrollments query.
+  • ON DELETE behaviour:
+      academicTermId  → RESTRICT  (cannot delete term with assignments)
+      organisationClassId → RESTRICT (cannot delete class with assignments)
+      subjectId       → RESTRICT  (cannot delete subject while assigned)
+      organizationId  → RESTRICT
+    Consistent with protect-student-data policy. Term/archival flows must delete
+    or reassign assignments first (or use soft-delete on terms).
+
+  • Missing composite index (low): (academicTermId, organisationClassId) —
+    getClasses and updateClass filter on both; existing separate indexes may
+    suffice; EXPLAIN on production data volumes.
+
+student
+  • classId ON DELETE SET NULL — student survives class removal; classId cleared.
+  • No FK from student to academicTerm — by design (see 10A).
+
+studentSubjectEnrollment
+  • RESTRICT on student, assignment, term — prevents accidental cascade data loss.
+  • Unique (studentId, subjectClassAssignmentId) — one enrollment per pair.
+
+Cascade summary for class operations
+  • Insert class → no cascades.
+  • Insert assignment → no cascades.
+  • Delete assignment with enrollments → BLOCKED (23503) — API maps this.
+  • Delete class with assignments / exports → BLOCKED at DB.
+  • Delete organisation → BLOCKED by RESTRICT chain.
+
+Optional schema hardening
+  • CHECK (length(trim(name)) > 0) on class.name.
+  • CHECK on subject_class_assignment ensuring organization_id matches parent's
+    org (requires trigger or application-only today).
+  • Partial index on class(organization_id) INCLUDE (name, form_teacher_id) if
+    list endpoint becomes hot path at scale.
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0 — Correctness / security
+  1. Validate termId / activeTermId with requireTermInOrganization.
+  2. Fix createClassDto: activeTermId optional unless subjectIds present.
+  3. Fix updateClassDto: true PATCH optional fields.
+  4. Verify class exists before subject sync on update.
+  5. Add @IsUUID({ each: true }) and @ArrayUnique() on subjectIds.
+
+P1 — Consistency / DX
+  6. Standardise { success: boolean, data, message? } responses.
+  7. Return created class id from POST /classes.
+  8. Align getSubjectClassAssignments empty state with getClasses (200 + []).
+  9. Wire request-id middleware for traceable errors.
+  10. Add classes.service.spec.ts and classes e2e tests for P0 cases.
+
+P2 — Polish
+  11. Replace "Not Assigned" with null in API.
+  12. Response DTOs + optional transform interceptor.
+  13. Export shared trim helper from common/validators.
+  14. Rename DTOs to PascalCase CreateClassDto / UpdateClassDto.
+  15. Evaluate citext for class.name uniqueness.
+
+================================================================================
+END OF REVIEW
+================================================================================

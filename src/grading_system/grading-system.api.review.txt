@@ -1,0 +1,253 @@
+================================================================================
+GRADING SYSTEM API — CODE REVIEW
+Route: api/src/grading_system  (HTTP: /api/v1/grading-system)
+Reviewed: 2026-06-22
+Files: grading-system.controller.ts, grading-system.service.ts,
+       grading-system.module.ts, dto/grading-system.dto.ts,
+       grading-system.validation.ts
+Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
+         common/interceptors/*, auth/guards/org-admin.guard.ts
+Client counterpart: client/app/(main)/term/gradingSystem/*, term.review.txt
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The grading-system module stores per-term grade bands (label, min/max score,
+remark) via GET (by termId) and POST (full replace: DELETE all + INSERT all).
+It uses OrgAdminGuard, requireTermInOrganization, rich validateGradingEntries
+(contiguous 0–100 coverage, no overlaps), and runWithDbContext on save. The
+full-replace strategy is justified: nothing references gradingEntry.id by FK.
+
+Main gaps: (1) success: string + ResponseTransform double-wrap; (2) GET lacks
+runWithDbContext; (3) POST returns 200 not 201 (minor REST semantics); (4) no
+LoggingInterceptor; (5) @ArrayMaxSize missing; (6) allow empty entries on save?
+(validation requires ≥1); (7) remark @MaxLength vs schema 256. Database design is
+solid: unique grade per term, score range CHECKs, CASCADE with term.
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • App-wide middleware sufficient. ✅
+  • No module middleware — correct.
+
+Optional
+  • Rate limit POST (full replace) if abused. 📌
+  • Body size — entry arrays typically small; 100 kb OK. ✅
+
+
+2) EXCEPTION FILTERS — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • saveGradingSystem uses runWithDbContext('grading_system', ...). ✅
+  • getGradingSystem — no wrapper.
+  • validateGradingEntries → BadRequestException.
+
+Mapped errors
+  • 23505 + 'grading_system' → 409 duplicate grade for term
+  • No 23503 branch — nothing FK-references grading_entry ✅
+
+Improvements
+  A) runWithDbContext on GET.
+     FIX: getGradingSystem wrapped in runWithDbContext('grading_system', ...). ✅
+  B) success: true responses.
+     FIX: getGradingSystem and saveGradingSystem return { success: true, data }. ✅
+
+
+3) PIPES — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • GetGradingSystemQueryDto, PostGradingSystemParamsDto, SaveGradingSystemDto. ✅
+  • @ValidateNested on entries. ✅
+
+Gaps
+
+  A) @MaxLength(16) on grade (medium) — schema varchar(16).
+     FIX: @MaxLength(16) on GradingEntryDto.grade. ✅
+  B) @MaxLength(256) on remark (medium) — schema varchar(256).
+     FIX: @MaxLength(256) on GradingEntryDto.remark. ✅
+  C) @ArrayMaxSize on entries (medium).
+     FIX: @ArrayMaxSize(20) on SaveGradingSystemDto.entries. ✅
+  D) @IsInt on minScore/maxScore — already @IsInt ✅
+  E) No @ArrayMinSize(1) on DTO — business rule only in validation function;
+     add @ArrayMinSize(1) for 422 before service.
+     FIX: @ArrayMinSize(1) on SaveGradingSystemDto.entries. ✅
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+  • OrgAdminGuard — appropriate. ✅
+  • requireTermInOrganization on GET and POST — term org scoping. ✅
+  • GET filters by organizationId + termId — defence in depth. ✅
+
+  A) TermStatusGuard (medium) 📌 — block edits when term ARCHIVED.
+  B) No org guard on reads — term helper is correct. ✅
+
+
+5) INTERCEPTORS — General use and improvements
+--------------------------------------------------------------------------------
+
+  A) ResponseTransform + string success (high) — same as term/assessment modules. ✅
+  B) LoggingInterceptor (medium) ✅
+  C) TimeoutInterceptor global OK ✅
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request
+  | DTO                      | Used on                    | Notes |
+  |--------------------------|----------------------------|-------|
+  | SaveGradingSystemDto     | POST /grading-system/:termId | entries array |
+  | GetGradingSystemQueryDto | GET ?termId=               | OK |
+  | PostGradingSystemParamsDto | POST param termId        | OK |
+
+Response DTOs — missing
+  • GradingEntryResponseDto { id, grade, minScore, maxScore, remark }.
+  • POST returns data: null after save — client refetches.
+
+
+7) CODE QUALITY
+--------------------------------------------------------------------------------
+
+Strengths
+  • validateGradingEntries is thorough: 0–100 contiguous, no gaps/overlaps,
+    duplicate grades case-insensitive. ✅
+  • Full replace in one transaction — simple and safe (no FK dependents). ✅
+  • Comment documenting why diff is skipped — excellent. ✅
+  • requireTermInOrganization + org filter on GET. ✅
+
+Issues
+
+  A) success: string (high)  ✅
+  B) POST @HttpCode(200) — create/replace semantics often 200 OK or 201; document
+     as "save" not "create". Low priority. ✅
+  C) runWithDbContext callback doesn't return value; success returned after — OK
+     but pattern differs from term (inline return). Low. ✅ (it's ok)
+  D) No LoggingInterceptor (low)  ✅
+  E) Empty save not allowed — product may want "clear all grades" via entries: []
+     (today validation rejects). Document or add explicit DELETE. 📌
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+  | Scenario                    | Current           | Recommended |
+  |-----------------------------|-------------------|-------------|
+  | Gap in ranges               | 400 validation    | OK ✅ |
+  | Does not start at 0 / end 100 | 400 validation  | OK ✅ |
+  | Duplicate grade label       | 400 validation / 409 | OK ✅ |
+  | minScore > maxScore         | 400 validation + DB CHECK | OK ✅ |
+  | Foreign termId              | 404               | OK ✅ |
+  | GET empty                   | 200 []            | OK ✅ |
+  | GET DB error                | 500               | runWithDbContext |  ✅
+  | Double-wrapped response     | Client            | success: true | 
+  | Save with 0 entries         | 400               | Product decision | FIXED ✅
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+─── Controller (e2e) ───
+
+Auth
+  [P0] GET/POST without session → 401
+  [P0] As orgadmin → 200
+
+GET ?termId=
+  [P0] No entries → 200, []
+  [P0] With entries → correct bands
+  [P1] Missing/invalid termId → 422
+  [P1] Foreign term → 404
+
+POST /:termId
+  [P0] Valid contiguous 0–100 → 200
+  [P0] Gap between bands → 400
+  [P0] Overlap → 400
+  [P0] Does not start at 0 → 400
+  [P0] Does not end at 100 → 400
+  [P0] Duplicate grade labels → 400
+  [P1] Replace existing: POST twice, second overwrites first
+  [P1] minScore > maxScore → 400
+  [P1] Foreign termId → 404
+  [P2] Grade label 129 chars → 422 after MaxLength
+  [P2] entries: [] → 400 (or allow clear — product)
+
+─── Service (unit) ───
+  [P0] validateGradingEntries: single band 0–100
+  [P0] validateGradingEntries: multi-band contiguous
+  [P1] Transaction deletes then inserts
+
+─── Mapper ───
+  [P1] 23505 grading_system duplicate grade
+
+
+10) DB DESIGN ISSUES
+--------------------------------------------------------------------------------
+  • Grading bands are term-scoped — correct (may differ per term/year). ✅
+  • No FK from scores to grading_entry — letter grades computed in app from
+    numeric score + bands; changing bands does not orphan score rows. ✅
+  • Full replace safe — documented in service. ✅
+  • remark optional — nullable column. ✅
+
+
+11) DB / SCHEMA OPTIMISATION
+--------------------------------------------------------------------------------
+
+grading_entry
+  • UNIQUE (academicTermId, grade) — matches validation. ✅
+  • CHECK min_score <= max_score; 0 <= scores <= 100. ✅
+  • INDEX academicTermId, organizationId. ✅
+  • FK academicTermId ON DELETE CASCADE — bands removed with term.
+  • FK organizationId ON DELETE RESTRICT.
+
+Cascade summary
+  • Delete term → CASCADE grading entries.
+  • Delete org → RESTRICT via organizationId.
+
+Optional
+  • No downstream RESTRICT — full replace is correct.
+  • Consider storing bands sorted by minScore in API response for client convenience.
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0
+  1. success: true on GET and POST responses.
+
+P1
+  2. runWithDbContext on GET.
+  3. @MaxLength on grade and remark; @ArrayMinSize(1) on entries.
+  4. LoggingInterceptor on controller.
+  5. grading-system e2e P0 tests.
+
+P2
+  6. Response DTOs.
+  7. TermStatusGuard for ARCHIVED.
+  8. Document POST 200 vs 201 semantics.
+  9. Explicit "clear grading" behaviour for empty entries.
+
+================================================================================
+END OF REVIEW
+================================================================================

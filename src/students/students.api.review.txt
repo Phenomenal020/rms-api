@@ -1,0 +1,307 @@
+================================================================================
+STUDENTS API — CODE REVIEW
+Route: api/src/students  (HTTP: /api/v1/students)
+Reviewed: 2026-06-22
+Files: students.controller.ts, students.service.ts, students.module.ts,
+       dto/student.dto.ts
+Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
+         common/interceptors/*, auth/guards/org-admin.guard.ts
+Client counterpart: client/fetcher/queries.ts, mutations.ts,
+                   client/app/(main)/enrollment/*, student management UI
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The students module provides org-admin CRUD-ish student management: list students,
+create, PATCH details/class, GET enrollments by class+term, POST save subject
+enrollments (diff insert/delete).
+
+Strengths: OrgAdminGuard on controller; create/saveEnrollment use
+runWithDbContext('student'); create validates classId in org; saveEnrollment
+validates assignment IDs against class/term; enrollment diff pattern sound;
+PATCH uses partial update object; gender @Transform to uppercase.
+
+Main gaps: (1) updateStudent returns undefined when classId unchanged — critical
+bug; (2) getStudents uses member join not requireOrganizationId direct filter;
+(3) getEnrollments/saveEnrollment lack requireTermInOrganization and class org
+validation; (4) getStudents/getEnrollments no runWithDbContext; (5) status DTO
+ACTIVE/INACTIVE vs schema SUSPENDED; (6) no @MaxLength(128) on names; (7)
+console.log in saveEnrollment; (8) delete enrollment with assessments → 23503
+not mapped for 'student'; (9) createStudent no .returning(); (10) no
+LoggingInterceptor; (11) classHistory / class change audit TODO incomplete.
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • App-wide middleware sufficient. ✅
+
+Recommendations
+  A) Optional rate limit on POST /students (bulk import future). 📌
+  B) saveEnrollment array size — add @ArrayMaxSize on enrolledSubjectIds.
+     FIX: @ArrayMaxSize(20) on SaveEnrollmentDto.enrolledSubjectIds (matches class subject cap). ✅
+
+
+2) EXCEPTION FILTERS — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • createStudent, saveEnrollment, updateStudent use runWithDbContext('student', ...). ✅
+  • getStudents, getEnrollments wrapped in runWithDbContext. ✅
+
+Mapped errors
+  • student 23503 → 400 cannot unenrol when assessments exist. ✅
+  • student 23505 → 409 duplicate enrollment. ✅
+
+Improvements
+  A) runWithDbContext on GET handlers.
+     FIX: getStudents + getEnrollments wrapped. ✅
+  B) student 23503: cannot unenrol — assessments exist.
+     FIX: postgres-error.mapper case 'student' for 23503. ✅
+  C) student 23505: duplicate enrollment unique key.
+     FIX: postgres-error.mapper case 'student' for 23505. ✅
+  D) runWithDbContext on all updateStudent paths.
+     FIX: single update path + runWithDbContext; empty mutable-fields guard. ✅
+
+
+3) PIPES — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • CreateStudentDto, UpdateStudentDto, SaveEnrollmentDto,
+    GetStudentEnrollmentsQueryDto, PatchStudentParamsDto. ✅
+  • Gender @Transform(toUpperCase) + @IsIn. ✅
+  • SaveEnrollmentDto @ArrayUnique @IsUUID each. ✅
+
+Gaps
+
+  A) @MaxLength(128) on firstName, middleName, lastName (medium)
+     Matches schema varchar(128).
+     FIX: @MaxLength(128) on Create/Update name fields. ✅
+
+  B) @MinLength(1) on required names after trim (medium)
+     FIX: @MinLength(1) on Create firstName/lastName; Update when provided. ✅
+
+  C) UpdateStudentDto.status @IsIn(['ACTIVE','INACTIVE']) — schema also has
+     SUSPENDED (medium)
+     FIX: STUDENT_STATUS_VALUES includes SUSPENDED. ✅
+
+  D) UpdateStudentDto.classId — @IsUUID when non-null; uses @Transform(trim)
+     not trimToNull — inconsistent with create (medium)
+     FIX: @IsUUID + @Transform(trimToNull) aligned with CreateStudentDto. ✅
+
+  E) SaveEnrollmentDto — @ArrayMaxSize (e.g. 20 subjects per class) (medium)
+     FIX: @ArrayMaxSize(20) on enrolledSubjectIds. ✅
+
+  F) CreateStudentDto gender required — OK; service default 'FEMALE' unreachable
+     if DTO enforced (low) ✅
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+  • OrgAdminGuard on controller — appropriate for school admin student registry. ✅
+  • Service org scoping via requireOrganizationId on mutations — good. ✅
+  • getStudents uses requireOrganizationId + student.organizationId filter. ✅
+
+  A) requireTermInOrganization on getEnrollments + saveEnrollment (high)
+     FIX: getEnrollments + saveEnrollment call requireTermInOrganization. ✅
+  B) Validate classId belongs to org on getEnrollments (high)
+     FIX: organisationClass lookup by classId + organizationId → 404 if missing. ✅
+  C) TermStatusGuard — block enrollment edits when term ARCHIVED (medium) 📌
+  D) No DELETE student endpoint — DB RESTRICT on enrollments prevents orphan
+     deletes; intentional? Document. 📌
+
+
+5) INTERCEPTORS — General use and improvements
+--------------------------------------------------------------------------------
+
+  A) ResponseTransform — all handlers return success: true today. ✅
+  B) LoggingInterceptor (medium) ✅
+  C) TimeoutInterceptor — getEnrollments N+1 style two queries; OK. ✅
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request — gaps in §3.
+
+Response DTOs — missing
+  • StudentListItemDto { id, firstName, middleName, lastName, gender, status,
+    classId }.
+  • EnrollmentStudentDto { student, enrollments: { enrollmentId, assignmentId }[] }.
+  • createStudent returns data: null — client refetches GET /students.
+
+Route ordering
+  • GET enrollments before PATCH :id — static path registered; OK. ✅
+
+
+7) CODE QUALITY
+--------------------------------------------------------------------------------
+
+Strengths
+  • createStudent transaction with class validation. ✅
+  • updateStudent partial studentUpdateData pattern. ✅
+  • saveEnrollment allowedAssignmentIds validation before diff. ✅
+  • Enrollment grouping Map by studentId. ✅
+
+Issues
+
+  A) updateStudent missing return when classId unchanged (critical)
+     FIX: unified update path; name-only PATCH returns updated row. ✅
+
+  B) getStudents member join (high)
+     Use requireOrganizationId + WHERE student.organizationId = ?
+     FIX: direct org filter via requireOrganizationId. ✅
+
+  C) getEnrollments no class/term org validation (high)
+     FIX: requireTermInOrganization + class lookup before student query. ✅
+
+  D) console.log in saveEnrollment (medium) ✅
+
+  E) classHistory not updated on class change — TODO commented (medium) ✅
+
+  F) createStudent no .returning() — client cannot show new id without refetch
+     (low) ✅ (Intentional)
+
+  G) updateStudent: classId branch nests runWithDbContext; other fields should
+     share one update path (medium)
+     FIX: single runWithDbContext after building studentUpdateData. ✅
+
+  H) saveEnrollment delete may fail silently to 500 if assessments exist (medium)
+     — needs mapper message.
+     FIX: student 23503 mapped in postgres-error.mapper. ✅
+
+  I) No LoggingInterceptor (low) ✅
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+  | Scenario                              | Current        | Recommended |
+  |---------------------------------------|----------------|-------------|
+  | PATCH name only                       | 200 updated    | OK ✅ |
+  | PATCH empty body                      | 400            | OK ✅ |
+  | PATCH same classId only               | 400 no fields  | OK ✅ |
+  | Student not in org                    | 404            | OK ✅ |
+  | Class not in org                      | 404            | OK ✅ |
+  | saveEnrollment invalid assignment id  | 400 clear msg  | OK ✅ |
+  | Student no classId                    | 400            | OK ✅ |
+  | Unenrol with scores                   | 400 mapped     | student 23503 ✅ |
+  | Duplicate enrollment insert           | 409 mapped     | student 23505 ✅ |
+  | GET students DB error                 | 500 fallback   | runWithDbContext ✅ |
+  | Foreign termId on enrollments         | 404            | requireTermInOrganization ✅ |
+  | Foreign classId on getEnrollments     | 404            | class org lookup ✅ |
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+─── Controller (e2e) ───
+
+Auth
+  [P0] GET /students without session → 401
+  [P0] POST as teacher → 401
+  [P0] All routes as orgadmin → OK
+
+GET /students
+  [P0] Returns only students in admin's org
+  [P1] Empty school → { success: true, data: [] }
+
+POST /students
+  [P0] Valid payload → 201, data: null
+  [P0] With valid classId → student.classId set
+  [P0] With foreign classId → 404
+  [P1] Missing firstName → 422
+  [P1] Name > 128 chars → 422 after @MaxLength
+
+PATCH /students/:id
+  [P0] Update firstName only → 200 with updated row (currently broken)
+  [P0] Update classId → 200
+  [P0] Foreign student id → 404
+  [P1] Invalid status → 422
+  [P1] Empty body → 400
+
+GET /students/enrollments?classId=&termId=
+  [P0] Students in class with enrollment ids
+  [P0] Foreign classId → 404 after fix
+  [P1] Foreign termId → 404 after fix
+
+POST /students/enrollment
+  [P0] Add/remove subject assignments → 201
+  [P0] Invalid assignment id → 400
+  [P0] Student without class → 400
+  [P1] Remove enrollment with assessment → 400 mapped
+  [P1] Duplicate save idempotent → 200
+
+─── Service (unit) ───
+  [P0] saveEnrollment diff partition
+  [P1] updateStudent all field combinations
+
+
+10) DB DESIGN ISSUES
+--------------------------------------------------------------------------------
+  • student scoped to organizationId — correct. ✅
+  • classId FK SET NULL on class delete — student survives unassigned. ✅
+  • student_status enum includes SUSPENDED — DTO incomplete. 📌
+  • classHistory JSON — append-only audit designed but not written. 📌
+  • student_subject_enrollment unique (studentId, subjectClassAssignmentId). ✅
+  • assessment → enrollment ON DELETE RESTRICT — blocks unenrol. ✅
+  • No student delete API while enrollments RESTRICT — correct safety. ✅
+
+
+11) DB / SCHEMA OPTIMISATION
+--------------------------------------------------------------------------------
+
+student
+  • INDEX organizationId, classId — list and class roster OK. ✅
+  • Optional composite (organizationId, classId) for enrollment page.
+
+student_subject_enrollment
+  • INDEX studentId, academicTermId — getEnrollments query OK. ✅
+  • inArray(studentId, ...) — batch fetch efficient for typical class sizes.
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0
+  1. Fix updateStudent — DONE ✅
+  2. getStudents: requireOrganizationId + direct organizationId filter — DONE ✅
+  3. getEnrollments + saveEnrollment: requireTermInOrganization; validate
+     classId in org — DONE ✅
+
+P1
+  4. runWithDbContext on GET handlers and full updateStudent — DONE ✅
+  5. postgres-error.mapper cases for 'student' 23503/23505 — DONE ✅
+  6. @MaxLength(128) on name fields — DONE ✅; @ArrayMaxSize on enrollment ids — DONE (ArrayMaxSize). ✅
+  8. Align status enum with schema (SUSPENDED) — DONE ✅
+  9. LoggingInterceptor.
+
+P2
+  10. Implement classHistory on class change.
+  11. createStudent .returning() or refetch documented.
+  12. TermStatusGuard on enrollment mutations.
+  13. Response DTOs + e2e P0 tests.
+
+================================================================================
+END OF REVIEW
+================================================================================

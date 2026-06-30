@@ -7,6 +7,7 @@ import { DatabaseModule } from "../database/database.module";
     imports: [DatabaseModule],  // To access DATABASE_CONNECTION
     controllers: [UsersController],
     providers: [UsersService],
+    exports: [UsersService]
 })
 
 export class UsersModule { }

@@ -17,7 +17,6 @@ export const studentStatusEnum = pgEnum("student_status", ["ACTIVE", "SUSPENDED"
 // Class record export: teacher submits a snapshot for org-admin approval
 export const classRecordExportStatusEnum = pgEnum("class_record_export_status", ["PENDING", "ACCEPTED", "REJECTED"]);
 
-
 // ***********************************************************************************
 // LEVEL 1: ORGANISATIONAL LEVEL (SCHOOL AND MEMBERS -TEACHERS AND ADMINS)
 // Better Auth organisation plugin — represents a school.
@@ -26,19 +25,16 @@ export const organization = pgTable(
   {
     // Better Auth base fields
     id: text("id").primaryKey().default(sql`gen_random_uuid()`),
-    name: text("name").notNull(),           // === school name
-    slug: text("slug").notNull().unique(),  // === schoolRegistrationId
-    logo: text("logo"),
+    name: varchar("name", { length: 128 }).notNull(),           // === school name
+    slug: varchar("slug", { length: 64 }).notNull().unique(),  // === schoolRegistrationId
+    logo: varchar("logo", { length: 256 }),
     // Subscription tier lives at the school level (REGULAR or PRO)
-    subscription: text("subscription").default("REGULAR"),
+    subscription: varchar("subscription", { length: 16 }).default("REGULAR"),
     // audit
     createdAt: timestamp("created_at").notNull(),
-    metadata: json("metadata"),
+    metadata: jsonb("metadata"),
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
   },
-  (table) => [
-    uniqueIndex("organization_slug_uidx").on(table.slug), // must be unique
-  ],
 );
 
 // User Management by Better Auth
@@ -46,19 +42,19 @@ export const organization = pgTable(
 export const user = pgTable("user", {
   // Better Auth base fields
   id: text("id").primaryKey().default(sql`gen_random_uuid()`),
-  name: text("name").notNull(),
-  email: text("email").notNull().unique(),
+  name: varchar("name", { length: 128 }).notNull(),
+  email: varchar("email", { length: 128 }).notNull().unique(),
   emailVerified: boolean("email_verified").default(false).notNull(),
-  image: text("image"),
+  image: varchar("image", { length: 2048 }),
   // twoFactor plugin field
   twoFactorEnabled: boolean("two_factor_enabled").default(false),
   // // Additional fields (declared in auth-setup.ts additionalFields)
-  firstName: text("first_name"),
-  lastName: text("last_name"),
+  firstName: varchar("first_name", { length: 64 }),
+  lastName: varchar("last_name", { length: 64 }),
   // admin plugin fields
-  role: text("role"),   // role: "TEACHER" | "ADMIN" 
+  role: varchar("role", { length: 16 }),   // role: "TEACHER" | "ADMIN" 
   banned: boolean("banned").default(false),
-  banReason: text("ban_reason"),
+  banReason: varchar("ban_reason", { length: 256 }),
   banExpires: timestamp("ban_expires"),
   // audit
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -132,7 +128,7 @@ export const twoFactor = pgTable(
     userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
   },
   (table) => [
-    index("twoFactor_secret_idx").on(table.secret),
+    // index("twoFactor_secret_idx").on(table.secret),
     index("twoFactor_userId_idx").on(table.userId),
   ],
 );
@@ -152,7 +148,7 @@ export const member = pgTable(
     // user affiliation (1-1 mapping)
     userId: text("user_id").notNull().references(() => user.id, { onDelete: "restrict" }),
     // role in the organisation (assigned on acceptance: "teacher" | "admin")
-    role: text("role").default("member").notNull(),
+    role: varchar("role", { length: 16 }).default("member").notNull(),
     // audit
     createdAt: timestamp("created_at").notNull(),
   },
@@ -174,10 +170,10 @@ export const invitation = pgTable(
     // organisation affiliation (1-1 mapping)
     organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
     // email of the teacher to invite
-    email: text("email").notNull(),
-    role: text("role").default("teacher").notNull(),    // role to assign on acceptance: "teacher" | "admin"
+    email: varchar("email", { length: 128 }).notNull(),
+    role: varchar("role", { length: 16 }).default("teacher").notNull(),    // role to assign on acceptance: "teacher" | "admin"
     // status of the invitation: "pending" | "accepted" | "rejected" | "cancelled"
-    status: text("status").default("pending").notNull(),
+    status: varchar("status", { length: 16 }).default("pending").notNull(),
     // audit
     expiresAt: timestamp("expires_at").notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -202,15 +198,18 @@ export const organisationClass = pgTable(
     // organisation affiliation (1-1 mapping)
     organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
     // name of the class
-    name: text("name").notNull(),
+    name: varchar("name", { length: 64 }).notNull(),
     // Form teacher for the class
-    formTeacherId: text("form_teacher_id").references(() => user.id, { onDelete: "restrict" }),
+    formTeacherId: varchar("form_teacher_id", { length: 128 }).references(() => user.id, { onDelete: "restrict" }),
     // audit
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
   },
   (table) => [
-    unique("organisationClass_organizationId_name_key").on(table.organizationId, table.name), // one class per organisation/school
+    uniqueIndex("organisationClass_organizationId_name_ci_key").on(
+      table.organizationId,
+      sql`lower(${table.name})`,
+    ), // one class per organisation/school (case-insensitive)
     index("organisationClass_organizationId_idx").on(table.organizationId),
     index("organisationClass_formTeacherId_idx").on(table.formTeacherId),
   ],
@@ -245,18 +244,18 @@ export const student = pgTable(
     // identifier
     id: text("id").primaryKey().default(sql`gen_random_uuid()`),
     // student information
-    firstName: text("first_name").notNull(),
-    middleName: text("middle_name"),
-    lastName: text("last_name").notNull(),
+    firstName: varchar("first_name", { length: 128 }).notNull(),
+    middleName: varchar("middle_name", { length: 128 }),
+    lastName: varchar("last_name", { length: 128 }).notNull(),
     dateOfBirth: timestamp("date_of_birth"),
     gender: genderEnum("gender").default("NONE").notNull(),
     status: studentStatusEnum("status").default("ACTIVE").notNull(),
     // class assignment — current class (fast operational query); previous assignments stored in classHistory
-    classId: text("class_id").references(() => organisationClass.id, { onDelete: "set null" }),
+    classId: varchar("class_id", { length: 128 }).references(() => organisationClass.id, { onDelete: "set null" }),
     // append-only JSON audit log — each entry records a class the student was previously assigned to
     classHistory: json("class_history"),
     // organisation (school) affiliation (1-1 mapping)
-    organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
+    organizationId: varchar("organization_id", { length: 128 }).notNull().references(() => organization.id, { onDelete: "restrict" }),
     // audit
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
@@ -278,7 +277,7 @@ export const academicTerm = pgTable(
     // identifier
     id: text("id").primaryKey().default(sql`gen_random_uuid()`),
     // academic year and term (immutable)
-    academicYear: text("academic_year").notNull(), // immutable
+    academicYear: varchar("academic_year", { length: 16 }).notNull(), // immutable
     term: termEnum("term").notNull(),              // immutable
     // term days, start and end dates (mutable)
     termDays: integer("term_days"),
@@ -313,10 +312,10 @@ export const gradingEntry = pgTable(
     // identifier
     id: text("id").primaryKey().default(sql`gen_random_uuid()`),
     // grade information
-    grade: text("grade").notNull(),
+    grade: varchar("grade", { length: 16 }).notNull(),
     minScore: integer("min_score").notNull(),
     maxScore: integer("max_score").notNull(),
-    remark: text("remark"),
+    remark: varchar("remark", { length: 256 }),
     // academic term affiliation (1-1 mapping)
     academicTermId: text("academic_term_id").notNull().references(() => academicTerm.id, { onDelete: "cascade" }),
     // denormalise organisationId
@@ -342,7 +341,7 @@ export const assessmentStructure = pgTable(
     // identifier
     id: text("id").primaryKey().default(sql`gen_random_uuid()`),
     // assessment type and percentage
-    type: text("type").notNull(),                    // e.g., CA, Exam
+    type: varchar("type", { length: 16 }).notNull(),                    // e.g., CA, Exam
     percentage: integer("percentage").notNull(),     // e.g., 30
     displayOrder: integer("display_order").notNull(), // e.g., 1
     // academic term affiliation (1-1 mapping)
@@ -441,7 +440,6 @@ export const assessment = pgTable(
   },
   (table) => [
     unique("assessment_studentSubjectEnrollmentId_key").on(table.studentSubjectEnrollmentId),
-    index("assessment_studentSubjectEnrollmentId_idx").on(table.studentSubjectEnrollmentId),
   ],
 );
 
@@ -453,8 +451,8 @@ export const assessmentScore = pgTable(
     id: text("id").primaryKey().default(sql`gen_random_uuid()`),
     // assessment affiliation (1-1 mapping)
     // assessment structure affiliation (1-1 mapping)
-    assessmentId: text("assessment_id").notNull().references(() => assessment.id, { onDelete: "cascade" }),
-    assessmentStructureId: text("assessment_structure_id").notNull().references(() => assessmentStructure.id, { onDelete: "cascade" }),
+    assessmentId: varchar("assessment_id", { length: 128 }).notNull().references(() => assessment.id, { onDelete: "cascade" }),
+    assessmentStructureId: varchar("assessment_structure_id", { length: 128 }).notNull().references(() => assessmentStructure.id, { onDelete: "restrict" }),
     score: integer("score").notNull(),
     // audit
     createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -480,15 +478,15 @@ export const classRecordExportRequest = pgTable(
   "class_record_export_request",
   {
     id: text("id").primaryKey().default(sql`gen_random_uuid()`),
-    comment: text("comment"),
-    classId: text("class_id").notNull().references(() => organisationClass.id, { onDelete: "restrict" }),
-    organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
-    academicTermId: text("academic_term_id").notNull().references(() => academicTerm.id, { onDelete: "restrict" }),
+    comment: varchar("comment", { length: 2000 }),
+    classId: varchar("class_id", { length: 128 }).notNull().references(() => organisationClass.id, { onDelete: "restrict" }),
+    organizationId: varchar("organization_id", { length: 128 }).notNull().references(() => organization.id, { onDelete: "restrict" }),
+    academicTermId: varchar("academic_term_id", { length: 128 }).notNull().references(() => academicTerm.id, { onDelete: "restrict" }),
     status: classRecordExportStatusEnum("status").default("PENDING").notNull(),
-    createdBy: text("created_by").notNull().references(() => user.id, { onDelete: "restrict" }),
-    reviewedBy: text("reviewed_by").references(() => user.id, { onDelete: "set null" }),
+    createdBy: varchar("created_by", { length: 128 }).notNull().references(() => user.id, { onDelete: "restrict" }),
+    reviewedBy: varchar("reviewed_by", { length: 128 }).references(() => user.id, { onDelete: "set null" }),
     reviewedAt: timestamp("reviewed_at"),
-    rejectionReason: text("rejection_reason"),
+    rejectionReason: varchar("rejection_reason", { length: 2000 }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (table) => [
@@ -497,6 +495,9 @@ export const classRecordExportRequest = pgTable(
     index("class_record_export_request_classId_idx").on(table.classId),
     index("class_record_export_request_status_idx").on(table.status),
     index("class_record_export_request_createdBy_idx").on(table.createdBy),
+    uniqueIndex("class_record_export_request_pending_class_term_unique")
+      .on(table.classId, table.academicTermId)
+      .where(sql`status = 'PENDING'`),
   ],
 );
 
@@ -509,9 +510,9 @@ export const classRecordExportRecord = pgTable(
     version: serial("version"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
-  (table) => [
-    index("class_record_export_record_requestId_idx").on(table.requestId),
-  ],
+  // (table) => [
+  //   index("class_record_export_record_requestId_idx").on(table.requestId),
+  // ],
 );
 
 

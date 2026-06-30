@@ -1,14 +1,14 @@
 // DTO for saving student assessment scores
 // Inferred from the client payload structure
 
-import { IsUUID, IsNumber, Min, Max, IsArray, ArrayMinSize, ValidateNested, IsOptional, IsString, IsNotEmpty } from 'class-validator';
+import { IsUUID, IsInt, Min, Max, IsArray, ArrayMinSize, ValidateNested, IsOptional, IsString, IsNotEmpty, ArrayMaxSize, MaxLength } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class ScoreDto {
   @IsUUID()
   assessmentStructureId!: string;
 
-  @IsNumber()
+  @IsInt()
   @Min(0)
   @Max(100)
   score!: number;
@@ -19,6 +19,7 @@ export class SubjectScoresDto {
   subjectId!: string;
 
   @IsArray()
+  @ArrayMaxSize(10)
   @ValidateNested({ each: true })
   @Type(() => ScoreDto)
   scores!: ScoreDto[];
@@ -33,6 +34,7 @@ export class SaveStudentScoresDto {
 
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(30)
   @ValidateNested({ each: true })
   @Type(() => SubjectScoresDto)
   studentSubjects!: SubjectScoresDto[];
@@ -68,6 +70,7 @@ export class SaveClassRecordExportDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   comment?: string;
 }
 

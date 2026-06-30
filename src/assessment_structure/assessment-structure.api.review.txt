@@ -1,0 +1,283 @@
+================================================================================
+ASSESSMENT STRUCTURE API — CODE REVIEW
+Route: api/src/assessment_structure  (HTTP: /api/v1/assessment-structure)
+Reviewed: 2026-06-22
+Files: assessment-structure.controller.ts, assessment-structure.service.ts,
+       assessment-structure.module.ts, dto/assessment-structure.dto.ts,
+       assessment-structure.validation.ts
+Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
+         common/interceptors/*, auth/guards/org-admin.guard.ts
+Client counterpart: client/app/(main)/term/assessment-structure/*, term.review.txt
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The assessment-structure module configures per-term assessment components (type,
+percentage, displayOrder) with POST (first save), GET (by termId), and PATCH
+(full sync with diff). It uses OrgAdminGuard, requireTermInOrganization, DTO +
+validateAssessmentEntries (100% total, unique types/orders), and runWithDbContext
+on mutations. The PATCH diff (update/insert/delete) is sound and maps 23503 when
+scores block deletion.
+
+Main gaps: (1) success: string responses + ResponseTransform double-wrap; (2) GET
+lacks runWithDbContext; (3) POST does not guard against existing structure (duplicate
+POST → 409); (4) create insert is not transactional; (5) percentage uses @IsNumber
+not @IsInt; (6) no @ArrayMaxSize on entries; (7) dead toDelete array in update;
+(8) no LoggingInterceptor; (9) misleading comment "owner of the term" (uses org
+membership). DB: assessment_structure CASCADE on term delete; assessment_score
+RESTRICT blocks component delete when scores exist — correctly mapped.
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • App-wide requestId, requestLogger, helmet, 100 kb JSON limit. ✅
+  • No module middleware — correct.
+
+Recommendations
+  A) App-wide middleware sufficient. ✅
+  B) Optional rate limit on POST/PATCH (arrays of entries). 📌
+  C) Consider slightly higher body limit only if many components — unlikely needed. ✅
+
+What NOT to put in middleware
+  • Term ownership — requireTermInOrganization in service.
+  • 100% total validation — validateAssessmentEntries.
+
+
+2) EXCEPTION FILTERS — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • create/update use runWithDbContext('assessment_structure', ...). ✅
+  • getAssessmentStructure — no wrapper; generic 500 on DB failure.
+  • validateAssessmentEntries failures → BadRequestException 400.
+
+Mapped errors
+  • 23505 → 409 duplicate type or displayOrder for term
+  • 23503 → 400 cannot remove components with recorded scores ✅
+
+Improvements
+  A) runWithDbContext on GET. ✅
+  B) success: true boolean responses. ✅
+  C) Pre-check POST when rows exist → 409 with clear message before insert. ✅
+
+
+3) PIPES — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • GetAssessmentStructureDto (termId query). ✅
+  • CreateAssessmentStructureDto / UpdateAssessmentStructureDto with @ValidateNested. ✅
+  • PatchAssessmentStructureParamsDto (termId param). ✅
+
+Gaps
+
+  A) @IsInt on percentage (medium)
+     Schema integer; DTO uses @IsNumber — accepts 30.5 → DB may truncate or error.
+     Use @IsInt @Min(1) @Max(100). ✅
+
+  B) @MaxLength(16) on type (medium)
+     Matches varchar(16) in schema. ✅
+
+  C) @ArrayMaxSize on entries (medium)
+     Unbounded array — large payload before validation. ✅
+
+  D) UpdateAssessmentEntryDto.id — @IsOptional @IsUUID ✅ for new rows without id.
+
+  E) POST termId in body + PATCH termId in URL — intentional; document that PATCH
+     ignores body termId if ever added.
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+  • OrgAdminGuard on controller — appropriate. ✅
+  • requireTermInOrganization on all service methods — term belongs to user's org. ✅
+  • No requireActive — term setup page edits structure before/during DRAFT; OK unless
+    product forbids editing ACTIVE term structure. 📌
+
+  A) TermStatusGuard (medium) 📌
+     Block structure changes when term is ARCHIVED or when scores are locked.
+     (To be Implemented)
+
+  B) Do not use org guard instead of term validation — term scoping is correct. ✅
+
+
+5) INTERCEPTORS — General use and improvements
+--------------------------------------------------------------------------------
+
+  A) ResponseTransform + success: string (high)
+     All handlers return success: 'Assessment structure fetched successfully' etc.
+     → double-wrap; client getAssessmentStructure uses data.data.
+
+     Fix: { success: true, data: rows }. ✅
+
+  B) LoggingInterceptor (medium) ✅
+  C) TimeoutInterceptor — global OK; PATCH diff may run many queries — monitor. ✅
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request — adequate with gaps in §3.
+
+Response DTOs — missing
+  • Recommend AssessmentStructureItemDto { id, type, percentage, displayOrder }.
+  • POST/PATCH return data: null — client refetches GET (OK with SWR mutate).
+
+  GET should return [] not 404 when no structure (today returns empty array). ✅
+
+
+7) CODE QUALITY
+--------------------------------------------------------------------------------
+
+Strengths
+  • validateAssessmentEntries: 100% total, unique type (case-insensitive), unique
+    displayOrder — mirrors DB uniques. ✅
+  • PATCH diff with invalid id detection. ✅
+  • Transaction on PATCH. ✅
+  • requireTermInOrganization consistent with grading-system, classes. ✅
+
+Issues
+
+  A) success: string (high) ✅
+  B) POST not idempotent — no "already exists" check (high)  ✅
+  C) POST insert without transaction (medium) ✅
+  D) Dead code: toDelete array declared, toDeleteIds used instead (low) 📌
+  E) Service comments say "owner" — uses org member not owner role (low) ✅
+  F) update loop: N updates in transaction — acceptable for small N (low) 
+  G) createAssessmentStructure does not return inserted rows/ids (low) ✅
+  H) No LoggingInterceptor (low) ✅
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+  | Scenario                              | Current        | Recommended |
+  |---------------------------------------|----------------|-------------|
+  | Percentages ≠ 100                     | 400 validation | OK ✅ |
+  | Duplicate type/order                  | 400 validation / 409 PG | OK ✅ |
+  | Delete component with scores          | 400 mapper     | OK ✅ |
+  | POST when structure exists            | 409 PG         | Pre-check + message | ✅
+  | termId from other org                 | 404 requireTerm| OK ✅ |
+  | Invalid entry id on PATCH             | 400 clear msg  | OK ✅ |
+  | GET DB failure                        | 500 generic    | runWithDbContext | ✅
+  | Empty entries array                   | 422 / 400      | OK ✅ |
+  | Double-wrapped GET                    | Client bug     | success: true |  📌
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+─── Controller (e2e) ───
+
+Auth
+  [P0] GET without session → 401
+  [P0] GET as orgadmin → 200
+  [P0] POST/PATCH without session → 401
+
+GET ?termId=
+  [P0] Valid term, no rows → 200, data: []
+  [P0] Valid term, rows exist → 200, ordered components
+  [P0] Missing termId → 422
+  [P1] Foreign termId → 404
+  [P1] Invalid termId UUID → 422
+
+POST /
+  [P0] Valid entries totalling 100% → 201
+  [P0] Total 99% or 101% → 400
+  [P0] Duplicate type (case-insensitive) → 400
+  [P0] Duplicate displayOrder → 400
+  [P1] Second POST same term → 409
+  [P1] termId other org → 404
+  [P1] Empty entries → 400
+  [P2] Percentage 30.5 → 422 after @IsInt
+  [P2] Unknown fields → 422
+
+PATCH /:termId
+  [P0] Add new entry (no id) → 200
+  [P0] Update existing entry → 200
+  [P0] Remove entry from payload → deleted
+  [P0] Remove entry with scores → 400 enrollment-style message
+  [P0] Foreign entry id in payload → 400
+  [P1] Full replace semantics: omit all → delete all (confirm product intent)
+  [P1] Idempotent PATCH same payload → 200
+  [P2] Concurrent PATCH → last wins
+
+─── Service (unit) ───
+  [P0] validateAssessmentEntries 100% edge cases
+  [P1] Diff partition: insert/update/delete/invalid
+
+─── Mapper ───
+  [P1] 23505 assessment_structure message
+  [P1] 23503 scores recorded message
+
+
+10) DB DESIGN ISSUES
+--------------------------------------------------------------------------------
+  • assessment_structure is term-scoped config — correct level. ✅
+  • Denormalized organizationId — matches other term tables; app must set consistently. ✅
+  • assessment_score FK RESTRICT — prevents silent data loss on structure shrink. ✅
+  • Type string not enum in DB — flexible (CA, Exam, Project); validation is app-level. ✅
+  • Deleting term CASCADEs structure rows — assignments may still RESTRICT term delete. ✅
+
+
+11) DB / SCHEMA OPTIMISATION
+--------------------------------------------------------------------------------
+
+assessment_structure
+  • UNIQUE (organizationId, academicTermId, type) — matches validation. ✅
+  • UNIQUE (organizationId, academicTermId, displayOrder) — matches validation. ✅
+  • CHECK percentage 1–100, display_order > 0. ✅
+  • INDEX academicTermId, organizationId. ✅
+  • FK academicTermId ON DELETE CASCADE.
+  • FK organizationId ON DELETE RESTRICT.
+
+assessment_score (downstream)
+  • assessmentStructureId ON DELETE RESTRICT — drives 23503 message. ✅
+
+Optional
+  • Composite index (academicTermId, displayOrder) for ordered list GET.
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0
+  1. success: true on all responses.
+  2. POST duplicate guard or document POST-only-once in API.
+  3. @IsInt on percentage.
+
+P1
+  4. runWithDbContext on GET.
+  5. Transaction wrap on POST insert.
+  6. @MaxLength(16) on type; @ArrayMaxSize on entries.
+  7. LoggingInterceptor.
+  8. e2e P0 tests.
+
+P2
+  9. TermStatusGuard for ARCHIVED terms.
+  10. Response DTOs.
+  11. Remove dead toDelete variable.
+
+================================================================================
+END OF REVIEW
+================================================================================

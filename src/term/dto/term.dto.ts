@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsEnum, IsOptional, IsInt, Min, MinLength, IsISO8601, IsUUID, IsIn } from 'class-validator';
+import { IsString, IsNotEmpty, IsEnum, IsOptional, IsInt, Min, MinLength, IsISO8601, IsUUID, IsIn, MaxLength } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 function trim({ value }: { value: unknown }) {
@@ -12,6 +12,7 @@ export class CreateTermDto {
     @IsNotEmpty()
     @Transform(trim)
     @MinLength(1, { message: 'Academic year must not be blank' })
+    @MaxLength(16, { message: 'Academic year too short' })
     academicYear!: string;
 
     @IsEnum(['FIRST', 'SECOND', 'THIRD'])

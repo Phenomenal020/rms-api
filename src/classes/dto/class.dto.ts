@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsArray, MinLength, IsNotEmpty, IsUUID } from 'class-validator';
+import { IsString, IsOptional, IsArray, MinLength, IsNotEmpty, IsUUID, MaxLength, ArrayMaxSize, ArrayUnique } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 function trim({ value }: { value: unknown }) {
@@ -6,59 +6,70 @@ function trim({ value }: { value: unknown }) {
   return value.trim();
 }
 
-export class createClassDto {
-  @IsString()
-  @Transform(trim)
-  @MinLength(1, { message: 'Class name must not be blank' })
-  name!: string;
 
-  @IsOptional()
-  @IsString()
-  @MinLength(1, { message: 'Form teacher must not be blank' })
-  formTeacherId!: string | null;
-
-  @IsString()
-  @MinLength(1, { message: 'Active term must not be blank' })
-  activeTermId?: string | null;
-
-  @IsOptional()
-  @IsArray()
-  subjectIds?: string[];
-}
-
-export class updateClassDto {
-  // id comes from the route param
-
-  @IsString()
-  @Transform(trim)
-  @MinLength(1, { message: 'Class name must not be blank' })
-  name!: string;
-
-  @IsOptional()
-  @IsString()
-  @MinLength(1, { message: 'Form teacher must not be blank' })
-  formTeacherId!: string | null;
-
-  @IsString()
-  @MinLength(1, { message: 'Active term must not be blank' })
-  activeTermId?: string | null;
-
-  @IsOptional()
-  @IsArray()
-  subjectIds?: string[];
-}
-
+// -----------------------  Get Classes -----------------------
+// termId is required to get classes for a specific term.
 export class GetClassesQueryDto {
   @IsOptional()
   @IsUUID()
   termId?: string;
 }
 
-export class GetClassEnrollmentsQueryDto {
+
+
+// ----------------------- Create Class -----------------------
+// active term id is required to create a class for a specific term.
+export class createClassDto {
+  // Must be a string and still valid after trimming
+  @Transform(trim)
   @IsString()
-  @IsNotEmpty()
+  @MinLength(1, { message: 'Class name must not be blank' })
+  name!: string;
+
+  // Either a provided uuid or "Not Assigned"
+  @IsOptional()
+  @IsString()
+  @MinLength(1, { message: 'Form teacher must not be blank' })
+  formTeacherId!: string | null;
+
+  // Must be a string, particularly uuid
+  @IsString({ message: 'Invalid active term information provided' })
   @IsUUID()
-  termId!: string;
+  activeTermId!: string;
+
+  // Optional array of subject ids to assign to the class
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20, { message: 'Maximum of 20 subjects can be assigned to a class' })
+  @ArrayUnique({ each: true }, { message: 'Subjects must be unique' })
+  subjectIds?: string[];
+}
+
+
+
+
+// ----------------------- Update Class -----------------------
+export class updateClassDto {
+  // id comes from the route param
+  @Transform(trim)
+  @IsString()
+  @MinLength(1, { message: 'Class name must not be blank' })
+  name!: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1, { message: 'Form teacher must not be blank' })
+  formTeacherId!: string | null;
+
+  @IsString({ message: 'Invalid active term information provided' })
+  @IsUUID()
+  activeTermId!: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20, { message: 'Maximum of 20 subjects can be assigned to a class' })
+  @ArrayUnique({ each: true }, { message: 'Subjects must be unique' })
+  subjectIds?: string[];
 }
 
 export class PatchClassParamsDto {
@@ -66,4 +77,15 @@ export class PatchClassParamsDto {
   @IsNotEmpty()
   @IsUUID()
   id!: string;
+}
+
+
+
+// ----------------------- Get Class Enrollments -----------------------
+
+export class GetClassEnrollmentsQueryDto {
+  @IsString()
+  @IsNotEmpty()
+  @IsUUID()
+  termId!: string;
 }

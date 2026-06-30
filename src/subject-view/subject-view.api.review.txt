@@ -1,0 +1,273 @@
+================================================================================
+SUBJECT-VIEW API — CODE REVIEW
+Route: api/src/subject-view  (HTTP: /api/v1/subject-view)
+Reviewed: 2026-06-30
+Files: subject-view.controller.ts, subject-view.service.ts,
+       subject-view.module.ts, dto/save-subject-scores.dto.ts, todo.md
+Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
+         common/interceptors/*, auth/guards/user.guard.ts,
+         student-view/* (read model + score upsert template)
+Client counterpart: client/app/(main)/subject-view/*, subject-view.review.txt
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The subject-view module exposes a single mutation: POST save-scores — bulk upsert
+of assessment scores for many students in one subject (inverse pivot of
+student-view save-scores). The controller applies UserGuard at class level.
+The service is a **stub**: it throws InternalServerErrorException with a
+"not yet migrated" message. DTOs (SaveSubjectScoresDto, StudentDataDto, ScoreDto)
+are defined with class-validator decorators. There are **no GET endpoints**;
+the client reuses student-view GET classes + class-record for the read pipeline.
+
+Main gaps: (1) P0 — implement saveSubjectScores (port from student-view); (2) no
+classId in payload — ambiguous when same subject exists in multiple classes;
+(3) no subject-teacher column in schema — product assumes form teacher today;
+(4) no runWithDbContext / LoggingInterceptor; (5) @IsNumber not @IsInt on score;
+(6) no @ArrayMaxSize; (7) todo.md references old commented validation — stale;
+(8) 500 stub should be 501 Not Implemented until ready. Read path dependency
+on student-view is intentional for form-teacher subject pivot UI.
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • App-wide middleware sufficient. ✅
+  • No module middleware — correct.
+
+Optional
+  • Rate limit POST save-scores — bulk studentsData × scores (whole class column). 📌
+  • Body size — similar to student-view save-scores; 100 kb default OK. ✅
+
+
+2) EXCEPTION FILTERS — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • saveSubjectScores throws InternalServerErrorException — not runWithDbContext.
+  • No DB access today — mapper never invoked.
+
+When implemented
+  • Mirror student-view: db.transaction, onConflictDoUpdate on assessment_score.
+  • Wrap in runWithDbContext('student', 'Failed to save subject scores', ...). 📌
+  • Map 23505 on assessment_score unique — handled by upsert, not error. ✅
+
+Improvements
+  A) Return 501 Not Implemented instead of 500 until migration complete. 📌
+  B) Add PgErrorContext branch for assessment_score FK failures if needed. 📌
+
+
+3) PIPES — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • SaveSubjectScoresDto — subjectId, academicTermId, studentsData[]. ✅
+  • StudentDataDto — studentId, scores[] with @ArrayMinSize(1). ✅
+  • ScoreDto — assessmentStructureId, @Min(0) @Max(100). ✅
+  • @ValidateNested + @Type on nested arrays. ✅
+
+Gaps
+
+  A) @IsInt on score (medium) — schema integer; DTO uses @IsNumber.
+     FIX: @IsInt @Min(0) @Max(100) on ScoreDto. 📌
+  B) @ArrayMaxSize on studentsData and scores (medium).
+     FIX: e.g. studentsData @ArrayMaxSize(60), scores @ArrayMaxSize(10). 📌
+  C) Missing classId (high) — subjectClassAssignment is per (class, subject, term).
+     Client uses firstClassId from getTeacherClasses; API cannot disambiguate
+     without classId in body.
+     FIX: add classId: UUID to SaveSubjectScoresDto + validate assignment. 📌
+  D) No duplicate studentId detection in studentsData (medium). 📌
+  E) todo.md claims decorators missing and validation commented out — false/stale. 📌
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+  • @UseGuards(UserGuard) on controller — teachers only; orgadmin blocked. ✅
+  • Matches client canEdit = role === "user". ✅
+  • No service-level auth yet (stub).
+
+When implemented
+  • requireTermInOrganization(..., { requireActive: true }). ✅ (mirror student-view)
+  • Authorisation model (product decision):
+    A) Form teacher only — assertFormTeacherForClass(userId, orgId, classId);
+       matches current UI (reads student-view class-record). 📌 Recommended for v1.
+    B) Subject teacher — schema has no teacherId on subjectClassAssignment;
+       would need schema + guard work. 📌
+  • TermStatusGuard on mutations (medium). 📌
+  • Validate all students belong to same classId as payload. 📌
+
+
+5) INTERCEPTORS — General use and improvements
+--------------------------------------------------------------------------------
+
+  A) ResponseTransform — implemented service should return { success: true, data: null }
+     like student-view save-scores. 📌
+  B) LoggingInterceptor — not on SubjectViewController.
+     FIX: @UseInterceptors(LoggingInterceptor) when implementing. 📌
+  C) TimeoutInterceptor global OK. ✅
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request
+  | DTO                   | Used on                | Notes |
+  |-----------------------|------------------------|-------|
+  | SaveSubjectScoresDto  | POST /save-scores      | studentsData[] |
+  | StudentDataDto        | nested                 | scores min 1 |
+  | ScoreDto              | nested                 | 0–100 |
+
+Response
+  • Intended: { success: true, data: null } — client mutates class-record SWR key. 📌
+  • Stub today: 500 envelope via exception filter.
+
+Missing
+  • classId on SaveSubjectScoresDto (see §3C). 📌
+  • Response DTO class — low priority. 📌
+
+Client alignment
+  • types/view.ts SaveSubjectScoresPayload matches DTO shape (no classId). 📌
+  • useSaveSubjectScores in fetcher/mutations.ts wired; UI edit flow disabled. ✅
+
+
+7) CODE QUALITY
+--------------------------------------------------------------------------------
+
+Strengths
+  • DTO structure mirrors student-view inverse (one subject, many students). ✅
+  • Service documents old vs new schema migration in block comment — helpful. ✅
+  • Module is minimal (DatabaseModule only) — appropriate. ✅
+  • Client subject-view.review.txt already lists implementation steps. ✅
+
+Issues
+
+  A) CRITICAL stub (high) — endpoint registered but always 500; breaks any
+     client call to useSaveSubjectScores.
+     FIX: implement saveSubjectScores or return 501 + disable route in client. 📌
+  B) No shared score-upsert helper with student-view — duplication risk. 📌
+  C) todo.md incorrect (decorators exist; no commented validation in service). 📌
+  D) No GET endpoints — acceptable while reusing student-view; document contract. ✅
+  E) eslint-disable unused vars on stub parameters — remove when implemented. 📌
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+  | Scenario                              | Current (stub)       | When implemented |
+  |---------------------------------------|----------------------|------------------|
+  | Any POST body                         | 500 Internal         | 501 until ready 📌 |
+  | No session                            | 401                  | OK ✅ |
+  | Orgadmin POST                         | 401 UserGuard        | OK ✅ |
+  | Invalid UUID body                     | 422                  | OK ✅ |
+  | Inactive term                         | —                    | 404 requireActive ✅ |
+  | Not form teacher                      | —                    | 403 ✅ |
+  | Subject not in class for term         | —                    | 400 ✅ |
+  | Student not enrolled                  | —                    | 400 ✅ |
+  | Invalid assessmentStructureId         | —                    | 400 ✅ |
+  | Duplicate studentId in payload        | —                    | 400 📌 |
+  | Students from mixed classes           | —                    | 400 📌 |
+  | DB failure                            | 500 generic          | runWithDbContext 📌 |
+  | Concurrent edit with student-view     | Last write wins      | document 📌 |
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+─── Controller (e2e) — after implementation ───
+
+Auth
+  [P0] POST without session → 401
+  [P0] POST as orgadmin → 401
+  [P0] POST as form teacher → 200
+
+POST /save-scores
+  [P0] Valid scores for all enrolled students in subject → 200
+  [P0] Upsert updates existing assessment_score rows
+  [P0] Not form teacher → 403
+  [P0] Student not enrolled → 400
+  [P0] Invalid structure id → 400
+  [P1] Inactive term → 404
+  [P1] Wrong classId for subject assignment → 400
+  [P1] Duplicate studentId in studentsData → 400
+  [P2] studentsData exceeds @ArrayMaxSize → 422
+
+─── Stub state (today) ───
+  [P0] POST any valid body → 500 (change to 501 or implement)
+
+─── Service (unit) ───
+  [P0] Loop studentsData; single subjectId; same upsert as student-view
+  [P1] Reject students not in payload classId
+
+─── Integration with student-view ───
+  [P1] Save via subject-view → GET class-record reflects scores
+  [P1] Concurrent student-view + subject-view save same cell — last write wins
+
+
+10) DB DESIGN ISSUES
+--------------------------------------------------------------------------------
+  • Same assessment_score path as student-view — no separate subject-view tables. ✅
+  • subjectClassAssignment has no teacherId — cannot authorize "subject teacher"
+    without schema change. 📌
+  • UNIQUE (organisationClassId, subjectId, academicTermId) on assignment — classId
+    required in API payload. ✅
+  • studentSubjectEnrollment unique (studentId, subjectClassAssignmentId) — enrollment
+    check per student mandatory. ✅
+
+
+11) DB / SCHEMA OPTIMISATION
+--------------------------------------------------------------------------------
+
+No subject-view–specific tables.
+
+Implementation uses existing chain:
+  subjectClassAssignment → studentSubjectEnrollment → assessment → assessment_score
+
+Optional future schema
+  • subjectClassAssignment.teacherId → subject-teacher role for non–form-teachers. 📌
+  • INDEX already on subjectId, organisationClassId, academicTermId. ✅
+
+Read model (client today)
+  • GET student-view/class-record — form-teacher scoped; subject-view pivots in UI. ✅
+  • Optional GET /subject-view/subject-record?classId&subjectId&termId — only if
+    read path diverges from class-record. 📌
+
+
+IMPLEMENTATION SKETCH (P0)
+--------------------------------------------------------------------------------
+  Port student-view.service saveStudentScores with these changes:
+    1. Add classId to SaveSubjectScoresDto; validate once via subjectClassAssignment.
+    2. assertFormTeacherForClass(userId, orgId, classId).
+    3. Load allowedStructureIds for term (same as student-view).
+    4. Outer loop: payload.studentsData (not studentSubjects).
+    5. Per student: requireStudentInOrganization; verify classId matches;
+       find enrollment for assignment.id; upsert assessment + scores.
+    6. Return { success: true, data: null }.
+  Extract shared private helper or small ScoreUpsertService to avoid duplication. 📌
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0
+  1. Implement saveSubjectScores (or 501 + remove client mutation until ready).
+  2. Add classId to SaveSubjectScoresDto and client SaveSubjectScoresPayload.
+  3. subject-view e2e: auth + happy-path bulk save.
+
+P1
+  4. runWithDbContext + LoggingInterceptor.
+  5. @IsInt, @ArrayMaxSize, duplicate studentId check.
+  6. Shared score upsert helper with student-view.
+  7. Update or delete stale todo.md.
+
+P2
+  8. TermStatusGuard.
+  9. Subject-teacher schema + guards if product requires non–form-teacher editors.
+  10. Optional GET subject-record endpoint.
+  11. Formal response DTOs.
+
+================================================================================
+END OF REVIEW
+================================================================================

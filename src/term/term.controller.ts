@@ -1,17 +1,19 @@
-import { Controller, Get, Post, Patch, Body, HttpCode, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Body, HttpCode, Param, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { TermService } from './term.service';
 import { CreateTermDto, UpdateTermDto, PatchTermParamsDto } from './dto/term.dto';
 import { OrgAdminGuard } from '../auth/guards/org-admin.guard';
+import { OrgMemberGuard } from '../auth/guards/org-member.guard';
+import { LoggingInterceptor } from '../common/interceptors/logging.interceptor';
 
 @Controller('terms')
-@UseGuards(OrgAdminGuard)
+@UseInterceptors(LoggingInterceptor)
 export class TermController {
   constructor(private readonly termService: TermService) { }
 
   // Fetch the terms for the authenticated user's school.
-  // Returns null when no terms exist yet — not an error.
   @Get()
+  @UseGuards(OrgMemberGuard)
   @HttpCode(200)
   async getTerms(@Session() session: UserSession) {
     return this.termService.getTerms(session.user.id);
@@ -19,6 +21,7 @@ export class TermController {
 
   // Create a new academic term
   @Post()
+  @UseGuards(OrgAdminGuard)
   @HttpCode(201)
   async createTerm(
     @Session() session: UserSession,
@@ -29,6 +32,7 @@ export class TermController {
 
   // Update an existing academic term (dates and days only — academicYear/term are immutable)
   @Patch(':id')
+  @UseGuards(OrgAdminGuard)
   @HttpCode(200)
   async updateTerm(
     @Session() session: UserSession,

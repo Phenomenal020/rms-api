@@ -1,20 +1,13 @@
-import {
-  Injectable, UnauthorizedException, BadRequestException,
-  ConflictException, NotFoundException, InternalServerErrorException, Inject,
-} from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, Inject } from '@nestjs/common';
+import { runWithDbContext } from '../common/filters/run-with-db-context';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
-import { student, member, organisationClass, studentSubjectEnrollment, subjectClassAssignment } from '../auth/schema';
+import { student, member, studentSubjectEnrollment, subjectClassAssignment } from '../auth/schema';
+import { requireOrganizationId, requireTermInOrganization, requireClassInOrganization, requireStudentInOrganization } from '../auth/org-context.helper';
 import { eq, and, asc, inArray } from 'drizzle-orm';
 import { CreateStudentDto, UpdateStudentDto, SaveEnrollmentDto } from './dto/student.dto';
 import * as schema from '../auth/schema';
 
-// type ClassHistoryEntry = {
-//   classId: string;
-//   className: string;
-//   removedAt: string; // ISO date string
-// };
-// 
 @Injectable()
 export class StudentsService {
 
@@ -26,76 +19,53 @@ export class StudentsService {
 
   // Get students for the authenticated user's school.
   async getStudents(userId: string) {
-    const students = await this.db
-      .select({
-        id: student.id,
-        firstName: student.firstName,
-        middleName: student.middleName,
-        lastName: student.lastName,
-        gender: student.gender,
-        status: student.status,
-        classId: student.classId,
-      })
-      .from(member)
-      .innerJoin(student, eq(student.organizationId, member.organizationId))
-      .where(eq(member.userId, userId))
-      .orderBy(asc(student.createdAt));
-
-    return { success: true, data: students };
+    return runWithDbContext('student', 'Failed to fetch students', async () => {
+      // Verify the user belongs to this school. Get the organisationId.
+      const organisationId = await requireOrganizationId(this.db, userId);
+      // Use that organisationId to fetch the students
+      const students = await this.db
+        .select({
+          id: student.id,
+          firstName: student.firstName,
+          middleName: student.middleName,
+          lastName: student.lastName,
+          gender: student.gender,
+          status: student.status,
+          classId: student.classId,
+        })
+        .from(student)
+        .where(eq(student.organizationId, organisationId))
+        .orderBy(asc(student.createdAt));
+      return { success: true, data: students };
+    });
   }
 
   // Create a new student for the authenticated user's school.
   async createStudent(userId: string, data: CreateStudentDto) {
-    try {
+    // Verify the user belongs to this school
+    const organisationId = await requireOrganizationId(this.db, userId);
+    // If a classId is provided, verify it belongs to this school
+    if (data.classId) {
+      await requireClassInOrganization(this.db, organisationId, data.classId);
+    }
+    // Finally, create the student
+    return runWithDbContext('student', 'Failed to create student', async () => {
       await this.db.transaction(async (tx) => {
-
-        // Verify user exists and has a school set up
-        const [currentMember] = await tx
-          .select({ organizationId: member.organizationId })
-          .from(member)
-          .where(eq(member.userId, userId))
-          .limit(1);
-        if (!currentMember) {
-          throw new UnauthorizedException('Unauthorised operation');
-        }
-        if (!currentMember.organizationId) {
-          throw new BadRequestException('Please set up your school information first');
-        }
-
-        // If a classId was supplied, verify it belongs to this organisation
-        if (data.classId) {
-          const [cls] = await tx
-            .select({ id: organisationClass.id })
-            .from(organisationClass)
-            .where(and(
-              eq(organisationClass.id, data.classId),
-              eq(organisationClass.organizationId, currentMember.organizationId),
-            ))
-            .limit(1);
-          if (!cls) {
-            throw new NotFoundException('Class not found');
-          }
-        }
-
-        // finally, insert the student into the database
         await tx
           .insert(student)
           .values({
             firstName: data.firstName,
             middleName: data.middleName ?? null,
             lastName: data.lastName,
-            gender: data.gender ?? 'FEMALE', // default to FEMALE when omitted
-            organizationId: currentMember.organizationId,
+            gender: data.gender ?? 'FEMALE',
+            organizationId: organisationId,
             status: 'ACTIVE',
             classId: data.classId ?? null,
             classHistory: [],
           });
       });
-
-      return { success: true, data: null };  // no data to return, just success flag
-    } catch (error) {
-      this.rethrowOrWrap(error, 'Failed to create student');
-    }
+      return { success: true, data: null };
+    });
   }
 
   // Update a student's personal details and/or class assignment.
@@ -104,34 +74,10 @@ export class StudentsService {
     if (Object.keys(data).length === 0) {
       throw new BadRequestException('No data to update');
     }
-
-    // Verify user exists and has a school set up
-    const [currentMember] = await this.db
-      .select({ organizationId: member.organizationId })
-      .from(member)
-      .where(eq(member.userId, userId))
-      .limit(1);
-    if (!currentMember) {
-      throw new UnauthorizedException('Unauthorised operation');
-    }
-    if (!currentMember.organizationId) {
-      throw new NotFoundException('School not found. Please create a school first.');
-    }
-
-    // Verify student belongs to this school — ownership check via organisationId
-    const [existingStudent] = await this.db
-      .select({
-        id: student.id,
-        classId: student.classId,
-        // classHistory: student.classHistory,
-      })
-      .from(student)
-      .where(and(eq(student.id, studentId), eq(student.organizationId, currentMember.organizationId)))
-      .limit(1);
-    if (!existingStudent) {
-      throw new NotFoundException('Student not found');
-    }
-
+    // Otherwise, retrieve the user's organisationId
+    const organisationId = await requireOrganizationId(this.db, userId);
+    // Verify the student belongs to this school
+    const existingStudent = await requireStudentInOrganization(this.db, organisationId, studentId);
     // Build the update payload — only include fields explicitly sent by the client.
     // undefined = not sent → leave DB value unchanged.
     // null     = field was cleared (via trimToNull DTO transform) → store null in DB.
@@ -141,137 +87,110 @@ export class StudentsService {
     if (data.lastName !== undefined) studentUpdateData.lastName = data.lastName;
     if (data.gender !== undefined) studentUpdateData.gender = data.gender;
     if (data.status !== undefined) studentUpdateData.status = data.status;
-
     // Handle class change — append old class to history if the class is actually changing (TODO)
     if (data.classId !== undefined && data.classId !== existingStudent.classId) {
       // const oldClassId = existingStudent.classId;
-
       // Validate the new classId belongs to this school (skip when clearing to null)
       if (data.classId) {
-        const [cls] = await this.db
-          .select({ id: organisationClass.id })
-          .from(organisationClass)
-          .where(and(
-            eq(organisationClass.id, data.classId),
-            eq(organisationClass.organizationId, currentMember.organizationId),
-          ))
-          .limit(1);
-        if (!cls) {
-          throw new NotFoundException('Class not found in this school');
-        }
+        await requireClassInOrganization(this.db, organisationId, data.classId);
       }
-
       // Set the new classId
       studentUpdateData.classId = data.classId;
-      // }
-
-      try {
-        // Single UPDATE — the WHERE clause re-checks ownership so a student from another school will simply not match and return no row.
-        const [updated] = await this.db
-          .update(student)
-          .set(studentUpdateData)
-          .where(and(eq(student.id, studentId), eq(student.organizationId, currentMember.organizationId)))
-          .returning();
-
-        if (!updated) {
-          throw new NotFoundException('Student not found');
-        }
-
-        // otherwise, return the updated student
-        return { success: true, data: updated };
-      } catch (error) {
-        this.rethrowOrWrap(error, 'Failed to update student');
-      }
     }
+    // If there are no fields to update, throw an error
+    if (Object.keys(studentUpdateData).length === 0) {
+      throw new BadRequestException('No fields to update');
+    }
+    // Finally, update the student with the update data
+    return runWithDbContext('student', 'Failed to update student', async () => {
+      const [updated] = await this.db
+        .update(student)
+        .set(studentUpdateData)
+        .where(and(eq(student.id, studentId), eq(student.organizationId, organisationId)))
+        .returning();
+      if (!updated) {
+        throw new NotFoundException('Student not found');
+      }
+      return { success: true, data: updated };
+    });
   }
 
   // ------------------------------- Enrollments -------------------------------
   // Fetch all students assigned to a specific class. For each student, get their enrolled subject ids. Also, include all subject-class assignments for the class.
   async getEnrollments(userId: string, classId: string, termId: string) {
-    // 1) First, get all students enrolled in the specified class
-    const students = await this.db
-      .select({
-        studentId: student.id,
-        firstName: student.firstName,
-        middleName: student.middleName,
-        lastName: student.lastName,
-        // classId: student.classId,
-      })
-      .from(member)
-      .innerJoin(student, eq(student.organizationId, member.organizationId))
-      .where(and(eq(student.classId, classId), eq(member.userId, userId)))
-      .orderBy(asc(student.createdAt));
-    if (students.length === 0) {
-      return { success: true, data: [] };
-    }
+    return runWithDbContext('student', 'Failed to fetch enrollments', async () => {
+      // Verify the user belongs to this school and the term is active
+      const organisationId = await requireTermInOrganization(this.db, userId, termId, { requireActive: true });
+      // Verify the class belongs to this school
+      await requireClassInOrganization(this.db, organisationId, classId);
+      // Fetch all students in the class
+      const students = await this.db
+        .select({
+          studentId: student.id,
+          firstName: student.firstName,
+          middleName: student.middleName,
+          lastName: student.lastName,
+        })
+        .from(student)
+        .where(and(eq(student.classId, classId), eq(student.organizationId, organisationId)))
+        .orderBy(asc(student.createdAt));
+      if (students.length === 0) {
+        return { success: true, data: [] };
+      }
+      // Fetch all enrollments for the students in the class
+      const enrollments = await this.db
+        .select({
+          enrollmentId: studentSubjectEnrollment.id,
+          studentId: studentSubjectEnrollment.studentId,
+          assignmentId: studentSubjectEnrollment.subjectClassAssignmentId,
+        })
+        .from(studentSubjectEnrollment)
+        .where(
+          and(
+            inArray(studentSubjectEnrollment.studentId, students.map((s) => s.studentId)),
+            eq(studentSubjectEnrollment.academicTermId, termId),
+          ),
+        )
+        .orderBy(asc(studentSubjectEnrollment.createdAt));
 
-    // 2) Fetch all enrollments for these students in one query, then group by studentId.
-    const enrollments = await this.db
-      .select({
-        enrollmentId: studentSubjectEnrollment.id,
-        studentId: studentSubjectEnrollment.studentId,
-        assignmentId: studentSubjectEnrollment.subjectClassAssignmentId,
-      })
-      .from(studentSubjectEnrollment)
-      .where(
-        and(
-          inArray(studentSubjectEnrollment.studentId, students.map((s) => s.studentId)),
-          eq(studentSubjectEnrollment.academicTermId, termId),
-        ),
-      )
-      .orderBy(asc(studentSubjectEnrollment.createdAt));
+      type enrollmentAssignment = {
+        enrollmentId: string;
+        assignmentId: string;
+      };
 
-    type enrollmentAssignment = {
-      enrollmentId: string;
-      assignmentId: string;
-    }
+      const enrolledByStudentId = new Map<string, enrollmentAssignment[]>();
+      for (const row of enrollments) {
+        const currentEnrolledSubjectIds = enrolledByStudentId.get(row.studentId) ?? [];
+        currentEnrolledSubjectIds.push({ enrollmentId: row.enrollmentId, assignmentId: row.assignmentId });
+        enrolledByStudentId.set(row.studentId, currentEnrolledSubjectIds);
+      }
 
-    const enrolledByStudentId = new Map<string, enrollmentAssignment[]>();
-    for (const row of enrollments) {
-      const currentEnrolledSubjectIds = enrolledByStudentId.get(row.studentId) ?? [];
-      currentEnrolledSubjectIds.push({ enrollmentId: row.enrollmentId, assignmentId: row.assignmentId });
-      enrolledByStudentId.set(row.studentId, currentEnrolledSubjectIds);
-    }
+      const studentsWithEnrollments = students.map((s) => ({
+        student: {
+          studentId: s.studentId,
+          firstName: s.firstName,
+          middleName: s.middleName,
+          lastName: s.lastName,
+        },
+        enrollments: enrolledByStudentId.get(s.studentId) ?? [],
+      }));
 
-    const studentsWithEnrollments = students.map((s) => ({
-      student: {
-        studentId: s.studentId,
-        firstName: s.firstName,
-        middleName: s.middleName,
-        lastName: s.lastName,
-      },
-      enrollments: enrolledByStudentId.get(s.studentId) ?? [],
-    }));
-
-    // console.log("studentsWithEnrollments", studentsWithEnrollments);
-
-    return { success: true, data: studentsWithEnrollments };
+      return { success: true, data: studentsWithEnrollments };
+    });
   }
 
   // Save a student's subject enrollments using 3-diff (insert/delete only).
   async saveEnrollment(userId: string, payload: SaveEnrollmentDto) {
-    // Verify user exists and has a school set up
-    const [currentMember] = await this.db
-      .select({ organizationId: member.organizationId })
-      .from(member)
-      .where(eq(member.userId, userId))
-      .limit(1);
-    if (!currentMember) {
-      throw new UnauthorizedException('Unauthorised operation');
-    }
-    if (!currentMember.organizationId) {
-      throw new BadRequestException('Please set up your school information first');
-    }
+    const organisationId = await requireTermInOrganization(this.db, userId, payload.activeTermId, {
+      requireActive: true,
+    });
 
     // Verify student belongs to this school
-    const [existingStudent] = await this.db
-      .select({ id: student.id, classId: student.classId })
-      .from(student)
-      .where(and(eq(student.id, payload.studentId), eq(student.organizationId, currentMember.organizationId)))
-      .limit(1);
-    if (!existingStudent) {
-      throw new NotFoundException('Student not found');
-    }
+    const existingStudent = await requireStudentInOrganization(
+      this.db,
+      organisationId,
+      payload.studentId,
+    );
     if (!existingStudent.classId) {
       throw new BadRequestException('Student is not assigned to any class');
     }
@@ -282,15 +201,13 @@ export class StudentsService {
       .from(subjectClassAssignment)
       .where(
         and(
-          eq(subjectClassAssignment.organizationId, currentMember.organizationId),
+          eq(subjectClassAssignment.organizationId, organisationId),
           eq(subjectClassAssignment.academicTermId, payload.activeTermId),
           eq(subjectClassAssignment.organisationClassId, existingStudent.classId),
         ),
       );
     const allowedAssignmentIds = new Set(assignments.map((a) => a.id));
-    console.log("allowedAssignmentIds", allowedAssignmentIds);
     const payloadAssignmentIds = new Set(payload.enrolledSubjectIds);
-    console.log("payloadAssignmentIds", payloadAssignmentIds);
 
     for (const id of payloadAssignmentIds) {
       if (!allowedAssignmentIds.has(id)) {
@@ -308,7 +225,7 @@ export class StudentsService {
       .where(
         and(
           eq(studentSubjectEnrollment.studentId, payload.studentId),
-          eq(studentSubjectEnrollment.organizationId, currentMember.organizationId),
+          eq(studentSubjectEnrollment.organizationId, organisationId),
           eq(studentSubjectEnrollment.academicTermId, payload.activeTermId),
         ),
       );
@@ -325,50 +242,38 @@ export class StudentsService {
       .filter((e) => !payloadAssignmentIds.has(e.subjectClassAssignmentId))
       .map((e) => e.id);
 
-    try {
-      await this.db.transaction(async (tx) => {
-        if (toInsertArray.length > 0) {
-          await tx.insert(studentSubjectEnrollment).values(
-            toInsertArray.map((subjectClassAssignmentId) => ({
-              studentId: payload.studentId,
-              subjectClassAssignmentId,
-              organizationId: currentMember.organizationId!,
-              academicTermId: payload.activeTermId,
-            })),
-          );
-        }
-
-        if (toDeleteArray.length > 0) {
-          await tx
-            .delete(studentSubjectEnrollment)
-            .where(
-              and(
-                eq(studentSubjectEnrollment.studentId, payload.studentId),
-                eq(studentSubjectEnrollment.organizationId, currentMember.organizationId),
-                eq(studentSubjectEnrollment.academicTermId, payload.activeTermId),
-                inArray(studentSubjectEnrollment.id, toDeleteArray),
-              ),
+    return runWithDbContext(
+      'student',
+      'Failed to save enrollment. Please try again later.',
+      async () => {
+        await this.db.transaction(async (tx) => {
+          if (toInsertArray.length > 0) {
+            await tx.insert(studentSubjectEnrollment).values(
+              toInsertArray.map((subjectClassAssignmentId) => ({
+                studentId: payload.studentId,
+                subjectClassAssignmentId,
+                organizationId: organisationId,
+                academicTermId: payload.activeTermId,
+              })),
             );
-        }
-      });
+          }
 
-      return { success: true, data: null };
-    } catch (error) {
-      this.rethrowOrWrap(error, 'Failed to save enrollment. Please try again later.');
-    }
-  }
+          if (toDeleteArray.length > 0) {
+            await tx
+              .delete(studentSubjectEnrollment)
+              .where(
+                and(
+                  eq(studentSubjectEnrollment.studentId, payload.studentId),
+                  eq(studentSubjectEnrollment.organizationId, organisationId),
+                  eq(studentSubjectEnrollment.academicTermId, payload.activeTermId),
+                  inArray(studentSubjectEnrollment.id, toDeleteArray),
+                ),
+              );
+          }
+        });
 
-  // Error handler — re-throws known NestJS exceptions; wraps unexpected ones.
-  private rethrowOrWrap(error: unknown, fallbackMessage: string): never {
-    if (
-      error instanceof BadRequestException ||
-      error instanceof UnauthorizedException ||
-      error instanceof ConflictException ||
-      error instanceof NotFoundException ||
-      error instanceof InternalServerErrorException
-    ) {
-      throw error;
-    }
-    throw new InternalServerErrorException(fallbackMessage);
+        return { success: true, data: null };
+      },
+    );
   }
 }

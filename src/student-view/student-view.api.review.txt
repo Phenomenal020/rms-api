@@ -1,0 +1,315 @@
+================================================================================
+STUDENT-VIEW API — CODE REVIEW
+Route: api/src/student-view  (HTTP: /api/v1/student-view)
+Reviewed: 2026-06-30
+Files: student-view.controller.ts, student-view.service.ts,
+       student-view.module.ts, dto/student-view.dto.ts, todo.md
+Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
+         common/interceptors/*, auth/guards/user.guard.ts,
+         auth/guards/org-member.guard.ts, record/* (export review flow)
+Client counterpart: client/app/(main)/students-view/*, students-view.review.txt
+================================================================================
+
+
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The student-view module is the form-teacher workspace: list classes (GET classes),
+load a full class report grid (GET class-record), upsert per-student assessment
+scores (POST save-scores), and submit a class-record export snapshot for admin
+review (POST export). Reads use OrgMemberGuard (teachers + org admins); mutations
+use UserGuard (form teachers only). Service methods return { success: true, data }
+and enforce org/term scoping via requireTermInOrganization, form-teacher checks,
+enrollment validation, and requireActive on writes.
+
+Main gaps: (1) no runWithDbContext on any DB path; (2) no LoggingInterceptor;
+(3) score DTO uses @IsNumber not @IsInt; (4) no @ArrayMaxSize on nested arrays;
+(5) no duplicate subjectId detection in save payload; (6) N+1 queries inside
+saveStudentScores transaction; (7) export pending-request check is app-only (race);
+(8) getClassRecord returns 404 for non–form-teacher (403 semantics); (9) todo.md
+is stale (DTO decorators exist). DB design for assessment → assessment_score
+upsert via onConflictDoUpdate is sound; class_record_export snapshot stores JSON.
+
+
+1) MIDDLEWARE — How can it be used here? Is it being used correctly?
+--------------------------------------------------------------------------------
+
+Current state
+  • App-wide requestId, requestLogger, helmet, 100 kb JSON limit. ✅
+  • No module middleware — correct.
+
+Optional
+  • Rate limit POST save-scores / export — bulk score payloads per student. 📌
+  • Body size — studentSubjects × scores can grow (class × subjects × components);
+    100 kb usually OK; monitor if large classes. ✅
+
+
+2) EXCEPTION FILTERS — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • All service methods call Drizzle directly — no runWithDbContext wrapper.
+  • Business rules → BadRequestException, NotFoundException, ForbiddenException.
+  • saveStudentScores uses db.transaction; saveClassRecordExport nests
+    getClassRecord then inserts request + record in a second transaction.
+
+Mapped errors
+  • assessment_score unique (assessmentId, assessmentStructureId) handled by
+    onConflictDoUpdate — no 23505 surface. ✅
+  • assessment_score CHECK score 0–100 — DB backstop if DTO allows float. ✅
+  • No dedicated PgErrorContext for student-view / assessment_score in mapper.
+
+Improvements
+  A) runWithDbContext on all four service methods (reads + writes).
+     FIX: wrap getTeacherClasses, getClassRecord, saveStudentScores,
+     saveClassRecordExport in runWithDbContext('student', ...). ✅
+  B) Map 23503 on assessment_structure delete elsewhere; score upsert path OK. ✅
+  C) Export insert: unique pending per class/term not enforced in DB — see §8.
+     FIX: partial unique index class_record_export_request_pending_class_term_unique
+     on (classId, academicTermId) WHERE status = 'PENDING'; mapped 23505 in
+     postgres-error.mapper student context. ✅
+
+
+3) PIPES — General use and improvements
+--------------------------------------------------------------------------------
+
+Current usage
+  • GetTeacherClassesQueryDto, GetClassRecordQueryDto — query UUIDs + messages. ✅
+  • SaveStudentScoresDto, SubjectScoresDto, ScoreDto — @ValidateNested. ✅
+  • SaveClassRecordExportDto — classId, academicTermId, optional comment. ✅
+  • SaveStudentScoresDto @ArrayMinSize(1) on studentSubjects. ✅
+
+Gaps
+
+  A) @IsInt on score (medium) — schema integer; DTO uses @IsNumber @Min @Max.
+     FIX: @IsInt @Min(0) @Max(100) on ScoreDto. ✅
+  B) @ArrayMaxSize on studentSubjects and nested scores (medium).
+     FIX: cap e.g. studentSubjects @ArrayMaxSize(30), scores @ArrayMaxSize(10). ✅
+  C) @MaxLength(2000) on SaveClassRecordExportDto.comment (medium) — schema
+     varchar(2000).
+     FIX: add @MaxLength(200) when comment present. ✅
+  D) Empty scores array allowed per SubjectScoresDto — no @ArrayMinSize on scores.
+     Product: allow partial save vs require full row — documented on scores field. ✅
+
+
+4) GUARDS — General use and current / improved usage
+--------------------------------------------------------------------------------
+
+  • GET classes, GET class-record → OrgMemberGuard (ROLE_USER | ROLE_ORG_ADMIN). ✅
+  • POST save-scores, POST export → UserGuard (ROLE_USER only). ✅
+  • requireTermInOrganization on all paths — org + term scoping. ✅
+  • save-scores / export use requireActive: true — inactive/archived term blocked. ✅
+  • assertFormTeacherForClass on save-scores — only form teacher of student's class. ✅
+  • getClassRecord filters organisationClass.formTeacherId = userId — defence in depth. ✅
+  • Org admin can read class record (OrgMemberGuard) but cannot POST (UserGuard). ✅
+
+  A) TermStatusGuard (medium) 📌 — explicit ARCHIVED block on mutations (partially
+     covered by requireActive today).
+  B) getClassRecord unauthorized → NotFoundException; consider ForbiddenException
+     for valid classId but wrong teacher (clearer 403 for client). 📌
+  C) No guard on classId org membership beyond form-teacher join — sufficient. ✅
+
+
+5) INTERCEPTORS — General use and improvements
+--------------------------------------------------------------------------------
+
+  A) ResponseTransform — service returns { success: true, data }; interceptor
+     passes through (isApiResponse). ✅
+  B) LoggingInterceptor — not on StudentViewController (unlike grading-system,
+     term, record, assessment-structure).
+     FIX: @UseInterceptors(LoggingInterceptor) on controller. ✅
+  C) TimeoutInterceptor global OK — getClassRecord can be heavy for large classes. ✅
+
+
+6) DTOs — Request and response
+--------------------------------------------------------------------------------
+
+Request
+  | DTO                      | Used on                         | Notes |
+  |--------------------------|---------------------------------|-------|
+  | GetTeacherClassesQueryDto | GET /classes?termId=           | OK |
+  | GetClassRecordQueryDto   | GET /class-record?classId&termId | OK |
+  | SaveStudentScoresDto     | POST /save-scores               | studentSubjects[] |
+  | SaveClassRecordExportDto | POST /export                    | comment optional |
+
+Response shapes (inline types in dto/student-view.dto.ts)
+  • getTeacherClasses → data: organisationClass rows (id, name, …).
+  • getClassRecord → data: { classId, className, assignments[], students[] }.
+  • StudentResultDto, SubjectRowDto — documented as types, not class-validator. ✅
+  • POST mutations → data: null (client refetches class-record). ✅
+
+Missing / optional
+  • Formal response DTO classes for OpenAPI / client codegen. 📌
+  • assignments duplicated in empty-students and full response — OK. ✅
+
+
+7) CODE QUALITY
+--------------------------------------------------------------------------------
+
+Strengths
+  • getClassRecord builds a consistent grid: assignments × students × enrollments
+    × assessment scores — matches client ResultTable model. ✅
+  • saveStudentScores validates structure ids, assignment, enrollment before write. ✅
+  • onConflictDoUpdate on assessment_score — idempotent upsert per component. ✅
+  • saveClassRecordExport reuses getClassRecord for snapshot — single source of truth. ✅
+  • Pending duplicate export rejected with clear BadRequestException. ✅
+  • Comments mark validation phases ("Validate user supplied parameters"). ✅
+
+Issues
+
+  A) N+1 in saveStudentScores (medium) — per subject: select assignment, enrollment,
+     assessment, then per score upsert. Large classes → many round-trips in one tx. 📌
+  B) No duplicate subjectId check in studentSubjects array (medium). 📌
+  C) saveClassRecordExport calls getClassRecord outside export tx — snapshot could
+     drift if scores change between read and insert (acceptable for export workflow). 📌
+  D) getClassRecord uses nested Drizzle with: — efficient for moderate class sizes;
+     watch memory for very large enrollments. 📌
+  E) requireOrganizationId imported in service file but unused — lint cleanup. 📌
+
+
+8) ERROR HANDLING
+--------------------------------------------------------------------------------
+
+  | Scenario                              | Current              | Recommended |
+  |---------------------------------------|----------------------|-------------|
+  | Missing/invalid termId (query)        | 422 ValidationPipe   | OK ✅ |
+  | Foreign term                          | 404                  | OK ✅ |
+  | GET classes, no form-teacher classes  | 200 []               | OK ✅ |
+  | GET class-record, not form teacher    | 404                  | 403? 📌 |
+  | save-scores, not form teacher         | 403                  | OK ✅ |
+  | save-scores, student not in org       | 404                  | OK ✅ |
+  | save-scores, not enrolled in subject  | 400                  | OK ✅ |
+  | save-scores, invalid structure id     | 400                  | OK ✅ |
+  | save-scores, inactive term            | 404 (requireActive)  | OK ✅ |
+  | save-scores, score out of range       | 422 DTO / DB CHECK   | @IsInt 📌 |
+  | export, not form teacher              | 403                  | OK ✅ |
+  | export, pending already exists        | 400                  | OK ✅ |
+  | export, concurrent duplicate pending  | Possible double row  | DB unique 📌 |
+  | DB connection failure                 | Generic 500          | runWithDbContext 📌 |
+  | Double-wrapped response               | success: true        | OK ✅ |
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+9) TEST CASES
+--------------------------------------------------------------------------------
+
+─── Controller (e2e) ───
+
+Auth
+  [P0] GET without session → 401
+  [P0] POST without session → 401
+  [P0] GET as orgadmin → 200 (classes, class-record)
+  [P0] POST save-scores as orgadmin → 401 (UserGuard)
+  [P0] POST export as orgadmin → 401
+
+GET /classes?termId=
+  [P0] Form teacher with classes → 200, list
+  [P0] Form teacher with none → 200, []
+  [P1] Missing/invalid termId → 422
+  [P1] Foreign term → 404
+
+GET /class-record?classId=&termId=
+  [P0] Own class → 200, assignments + students grid
+  [P0] Empty class → 200, students []
+  [P1] Wrong form teacher → 404 (or 403)
+  [P1] Foreign classId → 404
+
+POST /save-scores
+  [P0] Valid scores for enrolled subject → 200, data null
+  [P0] Upsert same structure id twice → single row updated
+  [P0] Not form teacher → 403
+  [P0] Not enrolled → 400
+  [P0] Invalid assessmentStructureId → 400
+  [P1] Inactive term → 404
+  [P1] Duplicate subjectId in payload → 400 (once implemented)
+  [P2] score 30.5 → 422 after @IsInt
+
+POST /export
+  [P0] Form teacher, valid class → 200, PENDING request + snapshot record
+  [P0] Second export while PENDING → 400
+  [P0] Not form teacher → 403
+  [P1] comment > 2000 chars → 422
+
+─── Service (unit) ───
+  [P0] getClassRecord maps enrollments to assignment grid correctly
+  [P1] saveStudentScores creates assessment row on first score
+  [P1] onConflictDoUpdate updates score + updatedAt
+
+─── Mapper ───
+  [P1] runWithDbContext maps connection errors consistently
+
+
+10) DB DESIGN ISSUES
+--------------------------------------------------------------------------------
+  • Scores hang off assessment → studentSubjectEnrollment — correct enrollment
+    scoping; one assessment per enrollment (unique). ✅
+  • assessment_score CASCADE on assessment delete; structure RESTRICT — aligns
+    with assessment-structure module. ✅
+  • Full class record is computed, not stored — export snapshot in
+    class_record_export_record.content (jsonb). ✅
+  • class_record_export_request: no UNIQUE (classId, academicTermId) WHERE
+    status = PENDING — duplicate pending possible under concurrency. 📌
+  • student.classId SET NULL on class delete — save-scores rejects unassigned student. ✅
+
+
+11) DB / SCHEMA OPTIMISATION
+--------------------------------------------------------------------------------
+
+assessment_score
+  • UNIQUE (assessmentId, assessmentStructureId) — matches upsert target. ✅
+  • CHECK score 0–100. ✅
+  • INDEX on assessmentId, assessmentStructureId. ✅
+
+class_record_export_request
+  • INDEX organizationId, academicTermId, classId, status. ✅
+  • Optional partial unique index on (classId, academicTermId) WHERE status = 'PENDING'. 📌
+
+class_record_export_record
+  • 1:1 requestId unique — one snapshot per request. ✅
+  • content jsonb — no schema validation at DB layer. 📌
+
+Cascade summary
+  • Delete enrollment → RESTRICT if assessment exists (scores must be cleared first).
+  • Delete term → RESTRICT on enrollments/assignments — expected.
+
+Optional
+  • Return assessmentStructureId sorted by displayOrder in class-record (client
+    sorts today). 📌
+  • Embed gradingSystem + assessmentStructure in class-record response to cut
+    round-trips (API design). 📌
+
+
+PRIORITISED ACTION LIST
+--------------------------------------------------------------------------------
+
+P0
+  1. student-view e2e P0 tests (auth, class-record, save-scores happy path).
+  2. Implement saveSubjectScores sibling in subject-view (shared score upsert logic).
+
+P1
+  3. runWithDbContext on all service methods.
+  4. @IsInt on score; @ArrayMaxSize on arrays; @MaxLength(2000) on comment.
+  5. LoggingInterceptor on StudentViewController.
+  6. Duplicate subjectId validation in saveStudentScores.
+  7. Partial unique index or transactional lock for pending export per class/term.
+
+P2
+  8. TermStatusGuard on mutations.
+  9. 403 vs 404 for wrong form teacher on GET class-record.
+  10. Batch upsert / reduce N+1 in saveStudentScores.
+  11. Formal response DTOs; update or delete stale todo.md.
+  12. Optional composite GET report-context endpoint.
+
+================================================================================
+END OF REVIEW
+================================================================================

@@ -1,11 +1,13 @@
-import { Controller, Get, Post, Patch, Body, Param, HttpCode, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Body, Param, HttpCode, Query, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { ClassesService } from './classes.service';
 import { createClassDto, updateClassDto, GetClassesQueryDto, GetClassEnrollmentsQueryDto, PatchClassParamsDto } from './dto/class.dto';
 import { OrgAdminGuard } from '../auth/guards/org-admin.guard';
-
+import { LoggingInterceptor } from '../common/interceptors/logging.interceptor';
+// 
 @Controller('classes')
 @UseGuards(OrgAdminGuard)
+@UseInterceptors(LoggingInterceptor)
 export class ClassesController {
   constructor(private readonly classesService: ClassesService) { }
 
@@ -18,6 +20,17 @@ export class ClassesController {
     @Query() query: GetClassesQueryDto,
   ) {
     return this.classesService.getClasses(session.user.id, query.termId ?? '');
+  }
+
+  // List subject-class assignments for a given term.
+  // Returns 200 with data: [] when no classes exist (not 404).
+  @Get('enrollments')
+  @HttpCode(200)
+  async getSubjectClassAssignments(
+    @Session() session: UserSession,
+    @Query() query: GetClassEnrollmentsQueryDto,
+  ) {
+    return this.classesService.getSubjectClassAssignments(session.user.id, query.termId);
   }
 
   // Create a new class in the current academic term.
@@ -41,15 +54,5 @@ export class ClassesController {
     @Body() data: updateClassDto,
   ) {
     return this.classesService.updateClass(session.user.id, params.id, data);
-  }
-
-  // Get all subject class assignments for a given term
-  @Get('enrollments')
-  @HttpCode(200)
-  async getSubjectClassAssignments(
-    @Session() session: UserSession,
-    @Query() query: GetClassEnrollmentsQueryDto,
-  ) {
-    return this.classesService.getSubjectClassAssignments(session.user.id, query.termId);
   }
 }

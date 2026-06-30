@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsUUID, IsNumber, IsInt, Min, Max, IsArray, ValidateNested, IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, IsUUID, IsNumber, IsInt, Min, Max, IsArray, ValidateNested, IsOptional, MaxLength, ArrayMaxSize } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 
 function trim({ value }: { value: string }) {
@@ -10,9 +10,10 @@ export class CreateAssessmentEntryDto {
   @IsString()
   @IsNotEmpty()
   @Transform(trim)
+  @MaxLength(16, { message: 'Assessment name too long' })
   type!: string;
 
-  @IsNumber()
+  @IsInt()
   @Min(1)
   @Max(100)
   percentage!: number;
@@ -33,6 +34,7 @@ export class CreateAssessmentStructureDto {
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => CreateAssessmentEntryDto)
+  @ArrayMaxSize(10, { message: 'Maximum 10 assessment entries allowed' })
   entries!: CreateAssessmentEntryDto[];
 }
 

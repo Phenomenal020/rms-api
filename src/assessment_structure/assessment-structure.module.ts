@@ -7,5 +7,6 @@ import { DatabaseModule } from '../database/database.module';
   imports: [DatabaseModule],
   controllers: [AssessmentStructureController],
   providers: [AssessmentStructureService],
+  exports: [AssessmentStructureService],
 })
 export class AssessmentStructureModule {}

@@ -1,11 +1,13 @@
-import { Controller, Get, Post, Patch, Body, Param, HttpCode, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Body, Param, HttpCode, Query, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { StudentsService } from './students.service';
 import { CreateStudentDto, UpdateStudentDto, SaveEnrollmentDto, GetStudentEnrollmentsQueryDto, PatchStudentParamsDto } from './dto/student.dto';
 import { OrgAdminGuard } from '../auth/guards/org-admin.guard';
+import { LoggingInterceptor } from 'src/common/interceptors/logging.interceptor';
 
 @Controller('students')
 @UseGuards(OrgAdminGuard)
+@UseInterceptors(LoggingInterceptor)
 export class StudentsController {
   constructor(private readonly studentsService: StudentsService) { }
 

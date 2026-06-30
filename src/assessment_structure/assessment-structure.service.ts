@@ -1,35 +1,13 @@
-import { Injectable, BadRequestException, UnauthorizedException, NotFoundException, InternalServerErrorException, ConflictException, Inject } from '@nestjs/common';
+import { Injectable, BadRequestException, Inject, ConflictException } from '@nestjs/common';
+import { runWithDbContext } from '../common/filters/run-with-db-context';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
-import { assessmentStructure, academicTerm, member } from '../auth/schema';
+import { assessmentStructure } from '../auth/schema';
+import { requireTermInOrganization } from '../auth/org-context.helper';
 import { eq, and, inArray } from 'drizzle-orm';
 import { validateAssessmentEntries } from './assessment-structure.validation';
 import { CreateAssessmentStructureDto, UpdateAssessmentStructureDto, UpdateAssessmentEntryDto, CreateAssessmentEntryDto } from './dto/assessment-structure.dto';
 import * as schema from '../auth/schema';
-
-// Re-throw known NestJS HTTP exceptions; wrap everything else as 500
-function rethrowOrWrap(error: unknown, fallbackMessage: string): never {
-  if (
-    error instanceof BadRequestException ||
-    error instanceof UnauthorizedException ||
-    error instanceof NotFoundException ||
-    error instanceof ConflictException ||
-    error instanceof InternalServerErrorException
-  ) {
-    throw error;
-  }
-  if (error instanceof Error && (error.message.includes('unique') || error.message.includes('duplicate'))) {
-    throw new ConflictException('Assessment structure conflicts with existing rows (duplicate type or order for this term)');
-  }
-  if (error instanceof Error && 'code' in error && (error as any).code === '23503') {
-    throw new BadRequestException(
-      'Cannot remove assessment components that already have scores recorded. ' +
-      'Please delete all assessment scores for this term before changing its structure.',
-    );
-  }
-  throw new InternalServerErrorException(fallbackMessage);
-}
-
 
 @Injectable()
 export class AssessmentStructureService {
@@ -39,48 +17,32 @@ export class AssessmentStructureService {
   ) { }
 
 
-  private async assertTermOwnership(userId: string, termId: string): Promise<string> {
-    const [row] = await this.db
-      .select({ organizationId: member.organizationId })
-      .from(member)
-      .innerJoin(
-        academicTerm,
-        and(
-          eq(academicTerm.organizationId, member.organizationId),
-          eq(academicTerm.id, termId),
-        ),
-      )
-      .where(eq(member.userId, userId))
-      .limit(1);
-
-    if (!row) {
-      throw new NotFoundException('Academic term not found or does not belong to your school');
-    }
-
-    return row.organizationId;
-  }
-
   // Get assessment structure for a term. GET /assessment-structure/{termId}
   async getAssessmentStructure(userId: string, termId: string) {
-    // ownership check
-    await this.assertTermOwnership(userId, termId);
-
-    const rows = await this.db
-      .select({
-        id: assessmentStructure.id,
-        type: assessmentStructure.type,
-        percentage: assessmentStructure.percentage,
-        displayOrder: assessmentStructure.displayOrder,
-        createdAt: assessmentStructure.createdAt,
-        updatedAt: assessmentStructure.updatedAt,
-      })
-      .from(assessmentStructure)
-      .where(eq(assessmentStructure.academicTermId, termId));
-
-    return {
-      success: 'Assessment structure fetched successfully',
-      data: rows,
-    };
+    return runWithDbContext(
+      'assessment_structure',
+      'Failed to fetch assessment structure. Please try again later.',
+      async () => {
+        // Assert that the user is the owner of the term
+        const organisationId = await requireTermInOrganization(this.db, userId, termId);
+        // Then, fetch the assessment structure for the term
+        const rows = await this.db
+          .select({
+            id: assessmentStructure.id,
+            type: assessmentStructure.type,
+            percentage: assessmentStructure.percentage,
+            displayOrder: assessmentStructure.displayOrder,
+            createdAt: assessmentStructure.createdAt,
+            updatedAt: assessmentStructure.updatedAt,
+          })
+          .from(assessmentStructure)
+          .where(and(eq(assessmentStructure.academicTermId, termId), eq(assessmentStructure.organizationId, organisationId)));
+        return {
+          success: true,
+          data: rows,
+        };
+      },
+    );
   }
 
   // Create assessment structure for a term. POST /assessment-structure
@@ -90,25 +52,38 @@ export class AssessmentStructureService {
     if (!validation.isValid) {
       throw new BadRequestException(validation.error);
     }
-
     // Assert that the user is the owner of the term
-    const organisationId = await this.assertTermOwnership(userId, payload.termId);
-
-    try {
-      await this.db.insert(assessmentStructure).values(
-        payload.entries.map(entry => ({
-          type: entry.type,
-          percentage: entry.percentage,
-          displayOrder: entry.displayOrder,
-          academicTermId: payload.termId,
-          organizationId: organisationId
-        })),
-      );
-
-      return { success: 'Assessment structure created successfully', data: null };
-    } catch (error) {
-      rethrowOrWrap(error, 'Failed to create assessment structure. Please try again later.');
-    }
+    const organisationId = await requireTermInOrganization(this.db, userId, payload.termId);
+    // Then, create the assessment structure for the term
+    return runWithDbContext(
+      'assessment_structure',
+      'Failed to create assessment structure. Please try again later.',
+      async () => {
+        await this.db.transaction(async (tx) => {
+          // Check if the term already has an assessment structure
+          const existing = await tx
+            .select({ id: assessmentStructure.id })
+            .from(assessmentStructure)
+            .where(eq(assessmentStructure.academicTermId, payload.termId))
+            .limit(1);
+          if (existing.length > 0) {
+            throw new ConflictException(
+              'This term already has an assessment structure. Did you mean to update it?',
+            );
+          }
+          // Then, create the assessment structure for the term
+          await tx.insert(assessmentStructure).values(
+            payload.entries.map(entry => ({
+              type: entry.type,
+              percentage: entry.percentage,
+              displayOrder: entry.displayOrder,
+              academicTermId: payload.termId,
+              organizationId: organisationId,
+            })),
+          );
+          return { success: 'Assessment structure created successfully', data: null };
+        })
+      })
   }
 
   // Update assessment structure for a term. PATCH /assessment-structure/{termId}
@@ -120,7 +95,7 @@ export class AssessmentStructureService {
     }
 
     // Assert that the user is the owner of the term
-    const organisationId = await this.assertTermOwnership(userId, termId);
+    const organisationId = await requireTermInOrganization(this.db, userId, termId);
 
     // Fetch existing structures for this term (needed for the diff)
     const dbStructures = await this.db
@@ -168,57 +143,54 @@ export class AssessmentStructureService {
       .filter(s => !updateIds.has(s.id))
       .map(s => s.id);
 
-    try {
-      const savedEntries = await this.db.transaction(async (tx) => {
+    return runWithDbContext(
+      'assessment_structure',
+      'Failed to update assessment structure. Please try again later.',
+      async () => {
+        await this.db.transaction(async (tx) => {
+          if (toDeleteIds.length > 0) {
+            await tx
+              .delete(assessmentStructure)
+              .where(
+                and(
+                  eq(assessmentStructure.academicTermId, termId),
+                  inArray(assessmentStructure.id, toDeleteIds),
+                ),
+              );
+          }
 
-        // Delete removed entries — onDelete: restrict on assessmentScore will reject
-        // this if any scores exist, caught and translated to 400 by rethrowOrWrap.
-        if (toDeleteIds.length > 0) {
-          await tx
-            .delete(assessmentStructure)
-            .where(
-              and(
-                eq(assessmentStructure.academicTermId, termId),
-                inArray(assessmentStructure.id, toDeleteIds),
-              ),
+          for (const entry of toUpdate) {
+            await tx
+              .update(assessmentStructure)
+              .set({
+                type: entry.type,
+                percentage: entry.percentage,
+                displayOrder: entry.displayOrder,
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(assessmentStructure.academicTermId, termId),
+                  eq(assessmentStructure.id, entry.id!),
+                ),
+              );
+          }
+
+          if (toInsert.length > 0) {
+            await tx.insert(assessmentStructure).values(
+              toInsert.map(entry => ({
+                type: entry.type,
+                percentage: entry.percentage,
+                displayOrder: entry.displayOrder,
+                academicTermId: termId,
+                organizationId: organisationId,
+              })),
             );
-        }
+          }
+        });
 
-        // Update in-place (preserves ids and thus assessmentScore FK references)
-        for (const entry of toUpdate) {
-          await tx
-            .update(assessmentStructure)
-            .set({
-              type: entry.type,
-              percentage: entry.percentage,
-              displayOrder: entry.displayOrder,
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(assessmentStructure.academicTermId, termId),
-                eq(assessmentStructure.id, entry.id!),
-              ),
-            );
-        }
-
-        // Insert newly added entries
-        if (toInsert.length > 0) {
-          await tx.insert(assessmentStructure).values(
-            toInsert.map(entry => ({
-              type: entry.type,
-              percentage: entry.percentage,
-              displayOrder: entry.displayOrder,
-              academicTermId: termId,
-              organizationId: organisationId
-            })),
-          );
-        }
-      });
-
-      return { success: 'Assessment structure updated successfully', data: null };
-    } catch (error) {
-      rethrowOrWrap(error, 'Failed to update assessment structure. Please try again later.');
-    }
+        return { success: 'Assessment structure updated successfully', data: null };
+      },
+    );
   }
 }

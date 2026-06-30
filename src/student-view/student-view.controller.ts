@@ -1,16 +1,19 @@
-import { Controller, Post, Get, Body, HttpCode, Query, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Body, HttpCode, Query, UseGuards, UseInterceptors } from '@nestjs/common';
 import { StudentViewService } from './student-view.service';
 import { SaveClassRecordExportDto, SaveStudentScoresDto, GetTeacherClassesQueryDto, GetClassRecordQueryDto } from './dto/student-view.dto';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { UserGuard } from '../auth/guards/user.guard';
+import { OrgMemberGuard } from 'src/auth/guards/org-member.guard';
+import { LoggingInterceptor } from '../common/interceptors/logging.interceptor';
 
 @Controller('student-view')
-@UseGuards(UserGuard)
+@UseInterceptors(LoggingInterceptor)
 export class StudentViewController {
   constructor(private readonly studentViewService: StudentViewService) { }
 
   // Get the class assigned to the form teacher for the given term
   @Get('classes')
+  @UseGuards(OrgMemberGuard)
   @HttpCode(200)
   async getTeacherClasses(
     @Session() session: UserSession,
@@ -21,6 +24,7 @@ export class StudentViewController {
 
   // Get the class record for the given class and term
   @Get('class-record')
+  @UseGuards(OrgMemberGuard)
   @HttpCode(200)
   async getClassRecord(
     @Session() session: UserSession,
@@ -31,6 +35,7 @@ export class StudentViewController {
 
   // Save student assessment scores
   @Post('save-scores')
+  @UseGuards(UserGuard)
   @HttpCode(200)
   async saveStudentScores(
     @Session() session: UserSession,
@@ -41,6 +46,7 @@ export class StudentViewController {
 
   // Save class record export request
   @Post('export')
+  @UseGuards(UserGuard)
   @HttpCode(200)
   async saveClassRecordExport(
     @Session() session: UserSession,
@@ -49,3 +55,4 @@ export class StudentViewController {
     return this.studentViewService.saveClassRecordExport(session.user.id, payload);
   }
 }
+// 

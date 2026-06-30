@@ -7,5 +7,6 @@ import { DatabaseModule } from '../database/database.module';
   imports: [DatabaseModule],
   controllers: [TermController],
   providers: [TermService],
+  exports: [TermService],
 })
 export class TermModule {}

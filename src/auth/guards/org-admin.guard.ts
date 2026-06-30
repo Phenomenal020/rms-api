@@ -9,11 +9,11 @@ export class OrgAdminGuard implements CanActivate {
     const user = request.user ?? request.session?.user;
 
     if (!user?.id) {
-      throw new UnauthorizedException('Unauthorised operation');
+      throw new UnauthorizedException('Unauthorised operation. Please sign in first..');
     }
 
     if (user.role !== ROLE_ORG_ADMIN) {
-      throw new UnauthorizedException('Unauthorised operation');
+      throw new UnauthorizedException('Unauthorised operation. You are not authorised to access this resource.');
     }  // deliberate to avoid leaking resource exists.
 
     return true;

@@ -1,16 +1,19 @@
-import { Controller, Get, Post, Body, Query, HttpCode, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, HttpCode, Param, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { GradingSystemService } from './grading-system.service';
 import { GetGradingSystemQueryDto, PostGradingSystemParamsDto, SaveGradingSystemDto } from './dto/grading-system.dto';
 import { OrgAdminGuard } from '../auth/guards/org-admin.guard';
+import { OrgMemberGuard } from '../auth/guards/org-member.guard';
+import { LoggingInterceptor } from 'src/common/interceptors/logging.interceptor';
 
 @Controller('grading-system')
-@UseGuards(OrgAdminGuard)
+@UseInterceptors(LoggingInterceptor)
 export class GradingSystemController {
   constructor(private readonly gradingSystemService: GradingSystemService) { }
 
   // Get grading system entries for a given term.
   @Get()
+  @UseGuards(OrgMemberGuard)
   @HttpCode(200)
   async getGradingSystem(
     @Session() session: UserSession,
@@ -21,7 +24,8 @@ export class GradingSystemController {
 
   // Save (full replace) the grading system for a given academic term.
   @Post(':termId')
-  @HttpCode(200)
+  @UseGuards(OrgAdminGuard)
+  @HttpCode(201)
   async saveGradingSystem(
     @Session() session: UserSession,
     @Param() params: PostGradingSystemParamsDto,
