@@ -8,6 +8,7 @@ import { classRecordExportRequest, student, subject, user } from '../auth/schema
 import { requireOrganizationId } from '../auth/org-context.helper';
 import { AddMemberDto } from './organisation.dto';
 import { runWithDbContext } from 'src/common/filters/run-with-db-context';
+import { ok } from 'src/common/utils/api-response';
 
 @Injectable()
 export class OrganisationService {
@@ -57,15 +58,12 @@ export class OrganisationService {
                 ),
             ]);
             // Return the row counts for the dashboard cards
-            return {
-                success: true,
-                data: {
-                    enrolledStudents,
-                    subjectsOffered,
-                    pendingRequests,
-                    approvedRequests,
-                },
-            };
+            return ok({
+                enrolledStudents,
+                subjectsOffered,
+                pendingRequests,
+                approvedRequests,
+            });
         }
         )
     }
@@ -99,10 +97,7 @@ export class OrganisationService {
                 throw new BadRequestException('Failed to add member to organisation. Please check the email and try again.');
             }
             // Return success if the member is added to the organisation
-            return {
-                success: true,
-                data: null
-            };
+            return ok(null);
         })
     }
 }

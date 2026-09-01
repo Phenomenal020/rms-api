@@ -1,4 +1,3 @@
-// api/src/main.ts
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
@@ -8,18 +7,18 @@ import helmet from 'helmet';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { ResponseTransformInterceptor } from './common/interceptors/response-transform.interceptor';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
-import express from 'express';
+import { NestExpressApplication } from '@nestjs/platform-express';
 
 async function bootstrap() {
 
   // Create the Nest application (With express adapter)
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
   });
-
-  app.use(express.json({limit: '100kb'}));
+  app.useBodyParser('json', { limit: '100kb' });
   app.use(helmet());
 
+  // Register the global exception filter
   app.useGlobalFilters(new AllExceptionsFilter());
 
   // use the reflector class to get the metadata of the controller and the method (we'll be looking for the skipResponse decorator)
@@ -31,7 +30,7 @@ async function bootstrap() {
   app.useGlobalInterceptors(
     new TimeoutInterceptor(15_000, reflector),
     new ResponseTransformInterceptor(reflector),
-  );
+  );   // Register global interceptors. We use the reflector to skip the response transform for certain controllers and methods.
 
   // Enable api versioning
   app.enableVersioning({

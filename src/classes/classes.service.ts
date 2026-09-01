@@ -2,12 +2,13 @@ import { Injectable, BadRequestException, NotFoundException, Inject } from '@nes
 import { runWithDbContext } from '../common/filters/run-with-db-context';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
-import { organisationClass, subjectClassAssignment, subject, user } from '../auth/schema';
+import { organisationClass, subjectClassAssignment, subject, user, member } from '../auth/schema';
 import { requireFormTeacherMember, requireOrganizationId, requireTermInOrganization } from '../auth/org-context.helper';
 import { eq, and, inArray, asc } from 'drizzle-orm';
-import { createClassDto, updateClassDto } from './dto/class.dto';
+import { CreateClassDto, UpdateClassDto } from './dto/class.dto';
 import { SubjectAssignmentDto } from './dto/class-response.dto';
 import * as schema from '../auth/schema';
+import { ok } from '../common/utils/api-response';
 
 @Injectable()
 export class ClassesService {
@@ -23,6 +24,7 @@ export class ClassesService {
   private async fetchFormTeachers(
     tx: Parameters<Parameters<typeof this.db.transaction>[0]>[0],
     formTeacherIds: string[],
+    organisationId: string,
   ): Promise<Map<string, { id: string; name: string; email: string; image: string | null }>> {
     // Initialise a new map
     const map = new Map<string, { id: string; name: string; email: string; image: string | null }>();
@@ -30,11 +32,12 @@ export class ClassesService {
     // If there are no form teacher ids, return the empty map
     if (formTeacherIds.length === 0) return map;
 
-    // Fetch the form teacher details from the database
+    // Fetch the form teacher details from the database, scoped to this school's members
     const rows = await tx
       .select({ id: user.id, name: user.name, email: user.email, image: user.image })
       .from(user)
-      .where(inArray(user.id, formTeacherIds));
+      .innerJoin(member, eq(member.userId, user.id))
+      .where(and(inArray(user.id, formTeacherIds), eq(member.organizationId, organisationId)));
 
     // Add the form teacher details to the map
     for (const row of rows) {
@@ -64,9 +67,10 @@ export class ClassesService {
             formTeacherId: organisationClass.formTeacherId,
           })
           .from(organisationClass)
-          .where(eq(organisationClass.organizationId, orgId));
+          .where(eq(organisationClass.organizationId, orgId))
+          .orderBy(asc(organisationClass.name));
         if (classRows.length === 0) {
-          return { success: true, data: [] };
+          return ok([]);
         }
 
         // Specifically extract the class ids for scoping other entries
@@ -78,7 +82,7 @@ export class ClassesService {
             classRows.map((row) => row.formTeacherId).filter((id): id is string => Boolean(id)),
           ),
         ];
-        const formTeacherMap = await this.fetchFormTeachers(tx, formTeacherIds);
+        const formTeacherMap = await this.fetchFormTeachers(tx, formTeacherIds, orgId);
 
         // 3) Get subject-class assignments scoped to this term AND these class ids, then join on subject for subject-specific fields.
         //    Build a Map<classId, subject[]> so each class only gets its own subjects.
@@ -103,8 +107,9 @@ export class ClassesService {
             .where(
               and(
                 eq(subjectClassAssignment.academicTermId, termId),
+                eq(subjectClassAssignment.organizationId, orgId),
                 inArray(subjectClassAssignment.organisationClassId, classIds),
-              ),  // scope to the given term and class ids
+              ),  // scope to the given term, school, and class ids
             );
 
           // Push the rows (subjects) into the subjectsByClassId map (key = organisationClassId, value = subject[])
@@ -129,14 +134,14 @@ export class ClassesService {
           subjects: subjectsByClassId.get(row.id) ?? [],
         }));
 
-        return { success: true, data: data };
+        return ok(data);
       });
     });
   }
 
-  // Create a new class. Optionally assign subjects to it for a given term 
-  // ActiveTermId is not required to create a class for now if subjectIds are not provided. I'm leaving it in strict mode for now just in case.
-  async createClass(userId: string, data: createClassDto) {
+  // Create a new class. Optionally assign subjects to it for a given term.
+  // activeTermId is only required when subjectIds are provided.
+  async createClass(userId: string, data: CreateClassDto) {
     // DTO + global ValidationPipe handles validation and transformation
     const subjectIds = data.subjectIds ?? [];
     // Subject assignment requires a term context — only enforce when subjects are being assigned
@@ -147,19 +152,19 @@ export class ClassesService {
     // Get the organisation id for the user and optionally ensure the term id belongs to the organisation (better than two separate db calls)
     const organisationId =
       subjectIds.length > 0
-        ? await requireTermInOrganization(this.db, userId, data.activeTermId, {
+        ? await requireTermInOrganization(this.db, userId, data.activeTermId!, {
           requireActive: true,
         })
         : await requireOrganizationId(this.db, userId);
 
     // Validate the form teacher id (if provided) is valid and belongs to the organisation
-    if (data.formTeacherId && data.formTeacherId !== 'Not Assigned') {
+    if (data.formTeacherId && data.formTeacherId !== null) {
       await requireFormTeacherMember(this.db, organisationId, data.formTeacherId);
     }
 
     // Insert the new class into the database including optional subjects and subject-assignments (eg, Maths for JSS1A) in a transaction
     return runWithDbContext('class', 'Failed to create class', async () => {
-      let newClassId: string | null = null;  // for testing purposes
+      let created: typeof organisationClass.$inferSelect | null = null;
 
       await this.db.transaction(async (tx) => {
         // Insert the new class into the database
@@ -167,10 +172,10 @@ export class ClassesService {
           .insert(organisationClass)
           .values({
             name: data.name,
-            formTeacherId: data.formTeacherId === "Not Assigned" ? null : data.formTeacherId,
+            formTeacherId: data.formTeacherId,
             organizationId: organisationId,
           })
-          .returning({ id: organisationClass.id });  //required to create classSubject assignment
+          .returning();
 
         // Optionally assign subjects for the given term (creates subjectClassAssignment entries)
         if (subjectIds.length > 0) {
@@ -202,15 +207,15 @@ export class ClassesService {
               })),
             );
         }
-        newClassId = newClass.id;
+        created = newClass;
       });
 
-      // finally, return the success message
-      return { success: true, data: newClassId };
+      return ok(created);
     });
   }
 
   async getSubjectClassAssignments(userId: string, termId: string) {
+    // Validate the term id
     if (!termId) {
       throw new BadRequestException('No active term found for this query.');
     }
@@ -220,15 +225,17 @@ export class ClassesService {
       const orgId = await requireTermInOrganization(this.db, userId, termId);
 
       return this.db.transaction(async (tx) => {
+        // Get all classes for the organisation
         const classes = await tx
           .select({ classId: organisationClass.id, name: organisationClass.name })
           .from(organisationClass)
           .where(eq(organisationClass.organizationId, orgId))
           .orderBy(asc(organisationClass.name));
         if (classes.length === 0) {
-          return { success: true, data: [] };
+          return ok([]);
         }
 
+        // Get all subject-class assignments for the organisation and term
         const assignmentRows = await tx
           .select({
             assignmentId: subjectClassAssignment.id,
@@ -261,7 +268,7 @@ export class ClassesService {
           name: cls.name,
           assignments: assignmentsByClassId.get(cls.classId) ?? [],
         }));
-        return { success: true, data };
+        return ok(data);
       });
     });
   }
@@ -269,11 +276,12 @@ export class ClassesService {
   // TODO: Too many DB calls. Optimise this on final review
   // Update a class that belongs to the authenticated user's school.
   // Class name / form teacher are org-level; subject assignments are term-scoped.
-  async updateClass(userId: string, classId: string, data: updateClassDto) {
+  async updateClass(userId: string, classId: string, data: UpdateClassDto) {
     // DTO + global ValidationPipe handles validation and transformation
 
-    const subjectIds = data.subjectIds ?? [];
-    if (subjectIds.length > 0 && !data.activeTermId) {
+    const subjectIds = data.subjectIds;
+    const syncSubjects = subjectIds !== undefined;
+    if (syncSubjects && !data.activeTermId) {
       throw new BadRequestException('academicTermId is required when updating subject assignments');
     }
 
@@ -286,44 +294,55 @@ export class ClassesService {
         : await requireOrganizationId(this.db, userId);
 
     // Validate the form teacher id (if provided) is valid and belongs to the organisation
-    if (data.formTeacherId && data.formTeacherId !== 'Not Assigned') {
+    if (data.formTeacherId && data.formTeacherId !== null) {
       await requireFormTeacherMember(this.db, organisationId, data.formTeacherId);
     }
 
     // Update the class in the database including optional subjects and subject-assignments (eg, Maths for JSS1A) in a transaction
     return runWithDbContext('class', 'Failed to update class', async () => {
+      let updated: typeof organisationClass.$inferSelect | null = null;
+
       await this.db.transaction(async (tx) => {
         // Check if the class exists and belongs to
         const classUpdateData: Partial<typeof organisationClass.$inferInsert> = {};
 
         // Validate class name and form teacher id
         if (data.name !== undefined) classUpdateData.name = data.name;
-        if (data.formTeacherId !== undefined) classUpdateData.formTeacherId = data.formTeacherId === "Not Assigned" ? null : data.formTeacherId;
+        if (data.formTeacherId !== undefined) classUpdateData.formTeacherId = data.formTeacherId;
 
         // Update the organisation class if there are any updates.
         // The WHERE clause includes organisationId so the row is only touched when the
         // class actually belongs to this school — no separate ownership SELECT needed.
         if (Object.keys(classUpdateData).length > 0) {
-          const result = await tx
+          const [updatedClass] = await tx
             .update(organisationClass)
             .set(classUpdateData)
-            .where(and(eq(organisationClass.id, classId), eq(organisationClass.organizationId, organisationId)));
-          if (!result.rowCount || result.rowCount === 0) {
+            .where(and(eq(organisationClass.id, classId), eq(organisationClass.organizationId, organisationId)))
+            .returning();
+          if (!updatedClass) {
             throw new NotFoundException('Class not found');
-          }  // if nothing was updated, then the class does not exist or does not belong to this school
+          }
+          updated = updatedClass;
+        } else if (syncSubjects) {
+          const [existing] = await tx
+            .select({ id: organisationClass.id })
+            .from(organisationClass)
+            .where(and(eq(organisationClass.id, classId), eq(organisationClass.organizationId, organisationId)));
+          if (!existing) {
+            throw new NotFoundException('Class not found');
+          }
         }
 
-        // If there are subject assignments to update, go ahead and update them
         // Sync subject assignments for the given term using a diff-based approach.
-        // Only runs when the caller provides an activeTermId — omitting it means "leave subjects as-is".
+        // Only runs when the caller provides subjectIds — omitting it means "leave subjects as-is".
         // Case A: in DB but not in payload → remove (unassigned by the user)
         // Case B: in payload but not in DB → add (newly assigned by the user)
         // Case C: in both → no-op (retain as-is)
-        if (data.activeTermId != null) {
-          // Get the term id from the payload
-          const termId = data.activeTermId;
+        if (syncSubjects) {
+          const termId = data.activeTermId!;
+          const assignedSubjectIds = subjectIds ?? [];
 
-          // Fetch the current subject assignments for this class + term
+          // Fetch the current subject assignments for this class + term in this school
           const currentAssignments = await tx
             .select({ subjectId: subjectClassAssignment.subjectId })
             .from(subjectClassAssignment)
@@ -331,18 +350,16 @@ export class ClassesService {
               and(
                 eq(subjectClassAssignment.organisationClassId, classId),
                 eq(subjectClassAssignment.academicTermId, termId),
+                eq(subjectClassAssignment.organizationId, organisationId),
               ),
             );
 
-          // Create a set of db ids and payload ids
           const dbIds = new Set(currentAssignments.map((a) => a.subjectId));
-          const payloadIds = new Set(subjectIds);
+          const payloadIds = new Set(assignedSubjectIds);
 
-          const toDelete = [...dbIds].filter((id) => !payloadIds.has(id));   // Case A: In db but not in payload
-          const toInsert = [...payloadIds].filter((id) => !dbIds.has(id));   // Case B: In payload but not in db
-          // Case C: In both sets (in db and in payload) requires no action
+          const toDelete = [...dbIds].filter((id) => !payloadIds.has(id));
+          const toInsert = [...payloadIds].filter((id) => !dbIds.has(id));
 
-          // If there are subjects to delete, go ahead and delete them
           if (toDelete.length > 0) {
             await tx
               .delete(subjectClassAssignment)
@@ -350,14 +367,13 @@ export class ClassesService {
                 and(
                   eq(subjectClassAssignment.organisationClassId, classId),
                   eq(subjectClassAssignment.academicTermId, termId),
+                  eq(subjectClassAssignment.organizationId, organisationId),
                   inArray(subjectClassAssignment.subjectId, toDelete),
                 ),
               );
           }
 
-          // If there are subjects to insert, go ahead and insert them
           if (toInsert.length > 0) {
-            // Validate that the new subjects belong to this school before inserting
             const validSubjects = await tx
               .select({ id: subject.id })
               .from(subject)
@@ -388,7 +404,24 @@ export class ClassesService {
         }
       });
 
-      return { success: true, data: classId };
+      return ok(updated ?? classId);
+    });
+  }
+
+  // Delete a class that belongs to the authenticated user's school.
+  // FK RESTRICT on subject assignments and export requests blocks delete while those exist
+  // (mapped to a clear 400 via runWithDbContext + postgres-error.mapper).
+  async deleteClass(userId: string, classId: string) {
+    const organisationId = await requireOrganizationId(this.db, userId);
+    return runWithDbContext('class', 'Failed to delete class', async () => {
+      const [deleted] = await this.db
+        .delete(organisationClass)
+        .where(and(eq(organisationClass.id, classId), eq(organisationClass.organizationId, organisationId)))
+        .returning();
+      if (!deleted) {
+        throw new NotFoundException('Class not found');
+      }
+      return ok(deleted);
     });
   }
 }

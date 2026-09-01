@@ -3,6 +3,7 @@ import { Reflector } from '@nestjs/core';
 import { Observable, map } from 'rxjs';
 import { ApiResponse } from '../interfaces/api-response.interface';
 import { SKIP_RESPONSE_TRANSFORM_KEY } from '../decorators/skip-response-transform.decorator';
+import { ok } from '../utils/api-response';
 
 @Injectable()
 export class ResponseTransformInterceptor<T> implements NestInterceptor<T, ApiResponse<T> | T> {
@@ -24,22 +25,28 @@ export class ResponseTransformInterceptor<T> implements NestInterceptor<T, ApiRe
     return next.handle().pipe(map((body) => this.normaliseResponse(body)));
   }
 
-  // Helper method that checks if the body is already an ApiResponse and returns it as is, otherwise it normalises the response to the ApiResponse interface
+  // Pass through bodies that already match the envelope;
+  // Wrap unmatched bodies in an ApiResponse with the defaults
   private normaliseResponse(body: T): ApiResponse<T> | T {
     if (this.isApiResponse(body)) {
       return body;
-    }  // if the body is already an ApiResponse, return it as is
+    }
 
-    return { success: true, data: body } as ApiResponse<T>;
+    // if the body is not an ApiResponse, set it to null and return the default values
+    return ok(body ?? null) as ApiResponse<T>;
   }
 
-  // Helper method that checks if the body is an ApiResponse
+  // check if the body is an ApiResponse. Returns true if it is, false otherwise
   private isApiResponse(body: T): boolean {
+    if (typeof body !== 'object' || body === null) {
+      return false;
+    }
+    const candidate = body as unknown as ApiResponse<T>;
     return (
-      typeof body === 'object' &&
-      body !== null &&
-      (body as unknown as ApiResponse<T>).success === true &&
-      'data' in body
+      typeof candidate.success === 'boolean' &&
+      'data' in candidate &&
+      'error' in candidate &&
+      'statusCode' in candidate
     );
   }
 }

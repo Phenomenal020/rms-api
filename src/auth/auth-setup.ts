@@ -17,8 +17,10 @@ import { z } from 'zod';
 
 import { ac, orgadmin, admin, user } from './permissions';
 import { getOrganisationByUserId } from './helpers';
-import type * as schema from './schema';
+import * as schema from './schema';
 
+
+// Helpers
 // Organisation metadata schema
 const orgMetadataSchema = z.object({
   address: z.string().trim().max(255, { message: "Address must be 255 characters or fewer" }).nullable().optional(),
@@ -33,14 +35,16 @@ const createOrgSchema = z.object({
   metadata: orgMetadataSchema,
 });
 
-// Update organisation schema
+// Update organisation schema — name, slug, and address are not updatable after onboarding
 const updateOrgSchema = z.object({
-  name: z.string().trim().min(1, { error: "School name cannot be empty" }).max(100, { error: "School name must be 100 characters or fewer" }).optional(),
-  metadata: orgMetadataSchema,
+  metadata: z.object({
+    motto: z.string().trim().max(500, { message: "Motto must be 500 characters or fewer" }).nullable().optional(),
+    telephone: z.string().trim().max(20, { message: "Telephone must be 20 characters or fewer" }).nullable().optional(),
+    email: z.email({ message: "Invalid email address" }).nullable().optional(),
+  }).optional(),
 });
 
-
-// generate a random slug for the organisation
+// generate a random slug for the organisation - organisation regId
 function generateSlug(fullName: string) {
   // extract the base name from the full school name
   const baseName = fullName
@@ -58,8 +62,10 @@ function generateSlug(fullName: string) {
 export function createBetterAuth(database: NodePgDatabase, configService: ConfigService) {
   return betterAuth({
     // Database configuration - postgres with drizzle adapter
+    // Pass schema so org plugin models (member, invitation, …) resolve correctly.
     database: drizzleAdapter(database, {
       provider: 'pg',
+      schema,
     }),
 
     // Only allow requests from the trusted origins
@@ -101,10 +107,24 @@ export function createBetterAuth(database: NodePgDatabase, configService: Config
         firstName: {
           type: "string",
           input: true,
+          required: true,
         },
         lastName: {
           type: "string",
           input: true,
+          required: true,
+        },
+        signUpRole: {
+          type: ["TEACHER", "SCHOOL_ADMIN"],
+          input: true,
+          required: true,
+          defaultValue: "TEACHER",
+        },
+        onboardingStatus: {
+          type: ["NONE", "PENDING", "APPROVED", "REJECTED", "CANCELLED"],
+          input: false,
+          required: true,
+          defaultValue: "NONE",
         },
       },
 
@@ -170,42 +190,21 @@ export function createBetterAuth(database: NodePgDatabase, configService: Config
 
       // organisation plugin — each organisation represents a school.
       organization({
-
         // disable organisation deletion
         disableOrganizationDeletion: true,
-
-        // only org admins can create organisations (schools)
+        // only platform admins can create organisations (schools)
         allowUserToCreateOrganization: async (user) => {
           const role = user.role;
-          return role === "orgadmin";
+          return role === "admin";
         },
-
         // Max members per organisation?
         membershipLimit: 100,
-
-        // cancel any existing pending invitation when a new one is sent to the same email
-        cancelPendingInvitationsOnReInvite: true,
-
-        // Users must verify their email before they can accept or reject invitations.
-        requireEmailVerificationOnInvitation: true,
-
-        // // setup invitation email
-        // async sendInvitationEmail(data) {
-        //   const inviteLink = await generateInviteLink(data.id);
-        //   await sendOrganizationInvitation({
-        //     email: data.email,
-        //     invitedByUsername: data.inviter.user.name,
-        //     invitedByEmail: data.inviter.user.email,
-        //     teamName: data.organization.name,
-        //     inviteLink: inviteLink,
-        //   })
-        // }
-
         organizationHooks: {
           // Organisation hooks: before/after create, update, delete org; before/after add/remove member; before/after invite.
           // before organisation creation hook
-          beforeCreateOrganization: async ({ organization, user }) => {
-            // parse the payload
+          // Check that the user is not already a member of this organisation or any other one (and that the organisation doesnt already have an orgadmin)
+          beforeCreateOrganization: async ({ organization }) => {
+            // parse the payload (use safeParse to prevent error throws)
             const result = createOrgSchema.safeParse({
               name: organization.name,
               metadata: organization.metadata,
@@ -227,37 +226,73 @@ export function createBetterAuth(database: NodePgDatabase, configService: Config
               },
             };
           },
-
-          // before organisation update hook
-          beforeUpdateOrganization: async ({ organization, user, member }) => {
-            // Parse the payload
+          // before organisation update hook: do not allow the orgadmin to update name, slug, or address
+          beforeUpdateOrganization: async ({ organization, user }) => {
+            // only verified orgadmins with 2FA can update organisations (schools)
+            if (
+              user.role !== "orgadmin" ||
+              user.twoFactorEnabled !== true ||
+              user.emailVerified !== true
+            ) {
+              throw new APIError("FORBIDDEN", { message: "You are not authorized to update this organisation" });
+            }
+            // Ensure name and slug are undefined
+            if (organization.name !== undefined || organization.slug !== undefined) {
+              throw new APIError("BAD_REQUEST", {
+                message: "School name and registration ID cannot be updated",
+              });
+            }
+            // Get the incoming metadata from the payload
+            const incomingMetadata = organization.metadata;
+            // Remove the address from the metadata
+            const { address: _, ...metadataWithoutAddress } =
+              incomingMetadata && typeof incomingMetadata === "object"
+                ? incomingMetadata
+                : {};
+            // Parse the modified metadata payload (w/o address)
             const result = updateOrgSchema.safeParse({
-              name: organization.name,
-              metadata: organization.metadata,
+              metadata: incomingMetadata === undefined ? undefined : metadataWithoutAddress,
             });
-            // if there is an error, throw a bad request error
+            // If there is an error, throw a bad request error
             if (!result.success) {
               throw new APIError("BAD_REQUEST", { message: result.error.issues[0].message });
             }
-            // Return the modified data
+            // Otherwise, get the existing organisation from the db
+            const existingOrg = await getOrganisationByUserId(
+              database as unknown as NodePgDatabase<typeof schema>,
+              user.id,
+            );
+            // Extract the existing address from the organisation
+            const existingAddress =
+              existingOrg?.metadata && typeof existingOrg.metadata === "object"
+                ? (existingOrg.metadata as Record<string, unknown>).address
+                : undefined;
+            // If the client sent no metadata, leave the stored record unchanged
+            if (result.data.metadata === undefined) {
+              return;
+            }
             return {
               data: {
-                ...organization,
-                name: organization.name?.trim(),
-                metadata: organization.metadata,
+                metadata: {
+                  ...result.data.metadata,
+                  address: existingAddress,
+                },
               },
             };
           },
-
-          // // before a member is added to an organisation hook
-          // beforeAddMember: async ({ member, user, organization }) => {
-          //   return {
-          //     data: {
-          //       ...member,
-          //       role: "custom-role", // Override the role
-          //     },
-          //   };
-          // },
+          // before add member: `user` is the person being added (not the caller).
+          // Reject if they already belong to any organisation.
+          beforeAddMember: async ({ member, user }) => {
+            const existingOrg = await getOrganisationByUserId(
+              database as unknown as NodePgDatabase<typeof schema>,
+              member.userId ?? user.id,
+            );
+            if (existingOrg) {
+              throw new APIError("BAD_REQUEST", {
+                message: "This user already belongs to a school",
+              });
+            }
+          },
         }
       }),
 
@@ -301,7 +336,6 @@ export function createBetterAuth(database: NodePgDatabase, configService: Config
     // PASSWORD VALIDATION (server-side)
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
-
         if (
           ctx.path === "/sign-up/email" ||
           ctx.path === "/reset-password" ||

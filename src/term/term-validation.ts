@@ -6,18 +6,20 @@ export interface DateValidationResult {
   error?: string;
 }
 
-function parseOptionalDate(value: string | null | undefined): Date | null | undefined {
+export type TermDateInput = string | Date | null | undefined;
+
+function parseOptionalDate(value: TermDateInput): Date | null | undefined {
   if (value === undefined) return undefined; // not updated by client
   if (value === null) return null; // cleared by client so no date provided
-  const date = new Date(value);
+  const date = value instanceof Date ? value : new Date(value);
   if (isNaN(date.getTime())) return null; // invalid ISO string
   return date;  // as Date object
 }
 
 // Validates that termEnd is strictly after termStart (when both are provided)
 export function validateTermDates(
-  termStart?: string | null,
-  termEnd?: string | null,
+  termStart?: TermDateInput,
+  termEnd?: TermDateInput,
 ): DateValidationResult {
   const start = parseOptionalDate(termStart);
   const end = parseOptionalDate(termEnd);

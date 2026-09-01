@@ -8,6 +8,7 @@ import { eq, and } from 'drizzle-orm';
 import { validateGradingEntries } from './grading-system.validation';
 import { SaveGradingSystemDto } from './dto/grading-system.dto';
 import * as schema from '../auth/schema';
+import { ok } from '../common/utils/api-response';
 
 @Injectable()
 export class GradingSystemService {
@@ -38,7 +39,7 @@ export class GradingSystemService {
           .from(gradingEntry)
           .where(and(eq(gradingEntry.academicTermId, termId), eq(gradingEntry.organizationId, organizationId)));
 
-        return { success: true, data: rows };
+        return ok(rows);
       },
     );
   }
@@ -84,7 +85,7 @@ export class GradingSystemService {
           }
         });
 
-        return { success: true, data: null };
+        return ok(null);
       },
     );
   }

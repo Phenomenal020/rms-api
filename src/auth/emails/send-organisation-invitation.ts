@@ -8,6 +8,20 @@ interface OrganisationInvitationData {
   inviteLink: string;
 }
 
+const BRAND = "#2f4858";
+const PAGE_BG = "#f4f4f1";
+const CARD_BG = "#ffffff";
+const BORDER = "#e4e2dd";
+const RULE = "#eeece8";
+const TEXT = "#1f2328";
+const BODY = "#4a5259";
+const MUTED = "#8b9199";
+const FOOTER = "#6b7280";
+const FAINT = "#9aa0a6";
+
+const SANS =
+  "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
 export async function sendOrganizationInvitation({
   email,
   invitedByUsername,
@@ -17,115 +31,72 @@ export async function sendOrganizationInvitation({
 }: OrganisationInvitationData) {
   await sendEmail({
     to: email,
-    subject: `You've been invited to join ${teamName} — Teacher's Aid`,
+    subject: `You've been invited to join ${teamName}`,
     html: `
-      <!DOCTYPE html>
-      <html lang="en">
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+      <html xmlns="http://www.w3.org/1999/xhtml" lang="en">
       <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="x-apple-disable-message-reformatting" />
+        <meta name="color-scheme" content="light only" />
+        <meta name="supported-color-schemes" content="light only" />
+        <title>You've been invited to join ${teamName}</title>
+        <!--[if mso]>
+        <style type="text/css">
+          body, table, td, p, h1 { font-family: Arial, Helvetica, sans-serif !important; }
+        </style>
+        <![endif]-->
       </head>
-      <body style="margin:0;padding:0;background-color:#09090f;font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased;color:#e8e8f0;">
-        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#09090f;padding:48px 20px;">
+      <body style="margin:0;padding:0;background-color:${PAGE_BG};font-family:${SANS};-webkit-font-smoothing:antialiased;color:${TEXT};">
+
+        <div style="display:none;font-size:1px;color:${PAGE_BG};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${invitedByUsername} invited you to join ${teamName} on Teacher's Aid.</div>
+
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:${PAGE_BG};padding:40px 16px;">
           <tr>
             <td align="center">
-              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="560" style="max-width:560px;background-color:#13131a;border-radius:12px;border:1px solid #1e1e2e;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,0.5);">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="520" style="max-width:520px;background-color:${CARD_BG};border-radius:8px;border:1px solid ${BORDER};">
 
-                <!-- Top gradient bar -->
+                <!-- Wordmark -->
                 <tr>
-                  <td style="height:3px;background:linear-gradient(90deg,#667eea 0%,#764ba2 100%);font-size:0;line-height:0;">&nbsp;</td>
-                </tr>
-
-                <!-- Logo row -->
-                <tr>
-                  <td style="padding:28px 40px 0;">
+                  <td style="padding:36px 40px 0;">
                     <table role="presentation" cellspacing="0" cellpadding="0" border="0">
                       <tr>
-                        <td style="width:32px;height:32px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:7px;text-align:center;vertical-align:middle;font-size:15px;">🛡</td>
-                        <td style="padding-left:10px;font-size:14px;font-weight:600;color:#e8e8f0;letter-spacing:-0.3px;">Teacher's Aid</td>
+                        <td style="width:26px;height:26px;background-color:${BRAND};border-radius:5px;text-align:center;vertical-align:middle;font-size:13px;font-weight:bold;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">T</td>
+                        <td style="padding-left:9px;font-size:14px;font-weight:500;color:${BRAND};letter-spacing:0.2px;">Teacher's Aid</td>
                       </tr>
                     </table>
                   </td>
                 </tr>
 
-                <!-- Content -->
+                <!-- Body -->
                 <tr>
-                  <td style="padding:32px 40px 16px;">
-                    <p style="margin:0 0 8px;font-size:10px;font-weight:600;letter-spacing:2.5px;text-transform:uppercase;color:#667eea;">School Invitation</p>
-                    <h1 style="margin:0 0 14px;font-size:26px;font-weight:700;color:#ffffff;letter-spacing:-0.6px;line-height:1.2;">You've been invited<br/>to join a school</h1>
-                    <p style="margin:0 0 24px;font-size:14px;color:#8888a8;line-height:1.65;"><strong style="color:#c8c8e0;">${invitedByUsername}</strong> (<a href="mailto:${invitedByEmail}" style="color:#667eea;text-decoration:none;">${invitedByEmail}</a>) has invited you to join <strong style="color:#c8c8e0;">${teamName}</strong> on Teacher's Aid.</p>
+                  <td style="padding:30px 40px 0;">
+                    <h1 style="margin:0 0 16px;font-size:19px;font-weight:500;color:${TEXT};line-height:1.35;">You've been invited to join ${teamName}</h1>
+                    <p style="margin:0 0 8px;font-size:15px;color:${BODY};line-height:1.6;">Hi there,</p>
+                    <p style="margin:0 0 26px;font-size:15px;color:${BODY};line-height:1.6;"><strong style="font-weight:500;color:${TEXT};">${invitedByUsername}</strong> (<a href="mailto:${invitedByEmail}" style="color:${FOOTER};text-decoration:underline;">${invitedByEmail}</a>) invited you to join <strong style="font-weight:500;color:${TEXT};">${teamName}</strong> on Teacher's Aid.</p>
 
-                    <!-- School name badge -->
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#0f0f14;border:1px solid #2a2a38;border-radius:10px;margin-bottom:24px;">
+                    <!-- CTA -->
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-bottom:14px;">
                       <tr>
-                        <td style="padding:20px 22px;">
-                          <p style="margin:0 0 4px;font-size:10px;font-weight:600;letter-spacing:2.5px;text-transform:uppercase;color:#8888a8;">School</p>
-                          <p style="margin:0;font-size:18px;font-weight:700;color:#ffffff;letter-spacing:-0.3px;">${teamName}</p>
+                        <td style="background-color:${BRAND};border-radius:6px;">
+                          <a href="${inviteLink}" style="display:inline-block;padding:12px 22px;font-size:14px;font-weight:500;color:#ffffff;text-decoration:none;">Accept invitation</a>
                         </td>
                       </tr>
                     </table>
 
-                    <!-- CTA button -->
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin-bottom:24px;">
-                      <tr>
-                        <td align="center">
-                          <a href="${inviteLink}" style="display:inline-block;padding:14px 36px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:8px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:-0.2px;">Accept Invitation</a>
-                        </td>
-                      </tr>
-                    </table>
-
-                    <!-- Fallback link -->
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#0f0f14;border:1px solid #2a2a38;border-radius:8px;margin-bottom:20px;">
-                      <tr>
-                        <td style="padding:14px 16px;">
-                          <p style="margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;">Or copy this link</p>
-                          <p style="margin:0;font-size:12px;color:#667eea;word-break:break-all;font-family:'Courier New',monospace;">${inviteLink}</p>
-                        </td>
-                      </tr>
-                    </table>
-
-                    <!-- Security alert -->
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#1a1114;border:1px solid #3d1a24;border-radius:8px;margin-bottom:20px;">
-                      <tr>
-                        <td style="padding:13px 15px;">
-                          <p style="margin:0;font-size:13px;color:#c07070;line-height:1.55;"><strong style="color:#e08888;">⚠ Security alert:</strong>&nbsp; If you don't recognise <strong>${invitedByUsername}</strong> or weren't expecting this invite, please ignore this email.</p>
-                        </td>
-                      </tr>
-                    </table>
-
-                    <!-- Info rows -->
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin-bottom:8px;">
-                      <tr>
-                        <td style="padding-bottom:10px;">
-                          <table role="presentation" cellspacing="0" cellpadding="0" border="0">
-                            <tr>
-                              <td style="color:#667eea;font-size:12px;padding-right:10px;vertical-align:top;padding-top:2px;">→</td>
-                              <td style="font-size:13px;color:#8888a8;line-height:1.55;">Click the button above or paste the link into your browser to accept.</td>
-                            </tr>
-                          </table>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td>
-                          <table role="presentation" cellspacing="0" cellpadding="0" border="0">
-                            <tr>
-                              <td style="color:#667eea;font-size:12px;padding-right:10px;vertical-align:top;padding-top:2px;">→</td>
-                              <td style="font-size:13px;color:#8888a8;line-height:1.55;">This invitation link will expire — accept it promptly.</td>
-                            </tr>
-                          </table>
-                        </td>
-                      </tr>
-                    </table>
+                    <p style="margin:0 0 30px;font-size:13px;color:${MUTED};line-height:1.6;">If the button doesn't work, paste this into your browser:<br /><a href="${inviteLink}" style="color:${FOOTER};text-decoration:underline;word-break:break-all;">${inviteLink}</a></p>
                   </td>
                 </tr>
 
                 <!-- Footer -->
                 <tr>
-                  <td style="padding:0 40px 28px;">
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-top:1px solid #1e1e2e;">
+                  <td style="padding:0 40px 32px;">
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-top:1px solid ${RULE};">
                       <tr>
                         <td style="padding-top:20px;">
-                          <p style="margin:0;font-size:12px;color:#4a4a6a;line-height:1.65;">You received this because someone invited you to a school on Teacher's Aid.<br/><a href="https://teachersaid.tech" style="color:#667eea;text-decoration:none;">teachersaid.tech</a> &nbsp;·&nbsp; <a href="mailto:support@teachersaid.tech" style="color:#667eea;text-decoration:none;">support@teachersaid.tech</a></p>
+                          <p style="margin:0 0 12px;font-size:13px;color:${FOOTER};line-height:1.6;">Don't recognise this invitation? You can safely ignore this email.</p>
+                          <p style="margin:0;font-size:12px;color:${FAINT};line-height:1.6;">Teacher's Aid &nbsp;·&nbsp; <a href="https://teachersaid.tech" style="color:${FOOTER};text-decoration:underline;">teachersaid.tech</a> &nbsp;·&nbsp; <a href="mailto:support@teachersaid.tech" style="color:${FOOTER};text-decoration:underline;">support@teachersaid.tech</a></p>
                         </td>
                       </tr>
                     </table>
@@ -139,6 +110,17 @@ export async function sendOrganizationInvitation({
       </body>
       </html>
     `,
-    text: `${invitedByUsername} (${invitedByEmail}) has invited you to join ${teamName} on Teacher's Aid.\n\nAccept your invitation:\n${inviteLink}\n\n⚠ If you don't recognise ${invitedByUsername} or weren't expecting this, please ignore this email.\n\nteachersaid.tech · support@teachersaid.tech`,
+    text: [
+      "Hi there,",
+      "",
+      `${invitedByUsername} (${invitedByEmail}) invited you to join ${teamName} on Teacher's Aid.`,
+      "",
+      "Accept your invitation:",
+      inviteLink,
+      "",
+      "Don't recognise this invitation? You can safely ignore this email.",
+      "",
+      "Teacher's Aid · teachersaid.tech · support@teachersaid.tech",
+    ].join("\n"),
   });
 }

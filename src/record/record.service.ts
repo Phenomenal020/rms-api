@@ -7,6 +7,7 @@ import { classRecordExportRequest, organisationClass, user } from '../auth/schem
 import { requireOrganizationId, requireTermInOrganization } from '../auth/org-context.helper';
 import { and, desc, eq } from 'drizzle-orm';
 import { ROLE_ORG_ADMIN, ROLE_USER } from 'src/auth/roles';
+import { ok } from 'src/common/utils/api-response';
 
 @Injectable()
 export class RecordService {
@@ -61,7 +62,7 @@ export class RecordService {
           and(...requestFilters),
         )
         .orderBy(desc(classRecordExportRequest.createdAt)); // newest requests first
-      return { success: true, data: rows };
+      return ok(rows);
     });
   }
 
@@ -96,15 +97,12 @@ export class RecordService {
         throw new NotFoundException('Record request not found.');
       }
       // Return the record
-      return {
-        success: true,
-        data: {
-          id: row.record.id,
-          requestId: row.record.requestId,
-          status: row.status,
-          content: row.record.content,
-        },
-      };
+      return ok({
+        id: row.record.id,
+        requestId: row.record.requestId,
+        status: row.status,
+        content: row.record.content,
+      });
     });
   }
 
@@ -144,10 +142,7 @@ export class RecordService {
         })
         .where(eq(classRecordExportRequest.id, request.id))
       // Return the success response
-      return {
-        success: true,
-        data: null,
-      };
+      return ok(null);
     });
   }
 
@@ -191,10 +186,7 @@ export class RecordService {
         })
         .where(eq(classRecordExportRequest.id, request.id))
       // Return the success response
-      return {
-        success: true,
-        data: null,
-      };
+      return ok(null);
     });
   }
 }

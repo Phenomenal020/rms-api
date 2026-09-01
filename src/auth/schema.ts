@@ -1,9 +1,9 @@
 import { relations, sql } from "drizzle-orm";
-import {pgTable, text, timestamp, boolean, index, pgEnum, integer, unique, check, uniqueIndex, varchar, json, jsonb, serial} from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, boolean, index, pgEnum, integer, unique, check, uniqueIndex, varchar, json, jsonb, serial } from "drizzle-orm/pg-core";
 
 // ENUMS
 // Gender for students
-export const genderEnum = pgEnum("gender", ["NONE", "MALE", "FEMALE"]);
+export const genderEnum = pgEnum("gender", ["MALE", "FEMALE"]);
 
 // Academic term within a school year
 export const termEnum = pgEnum("term", ["FIRST", "SECOND", "THIRD"]);
@@ -12,10 +12,22 @@ export const termEnum = pgEnum("term", ["FIRST", "SECOND", "THIRD"]);
 export const academicTermStatusEnum = pgEnum("academic_term_status", ["DRAFT", "ACTIVE", "ARCHIVED"]);
 
 // Student status
-export const studentStatusEnum = pgEnum("student_status", ["ACTIVE", "SUSPENDED", "INACTIVE"]);
+export const studentStatusEnum = pgEnum("student_status", ["ACTIVE", "INACTIVE"]);
 
 // Class record export: teacher submits a snapshot for org-admin approval
 export const classRecordExportStatusEnum = pgEnum("class_record_export_status", ["PENDING", "ACCEPTED", "REJECTED"]);
+
+// Sign up role
+export const signUpRoleEnum = pgEnum("sign_up_role", ["TEACHER", "SCHOOL_ADMIN"]);
+
+// Onboarding status
+export const onboardingStatusEnum = pgEnum("onboarding_status", ["NONE", "PENDING", "APPROVED", "REJECTED", "CANCELLED"]);
+
+// Onboarding request status
+export const onboardingRequestStatusEnum = pgEnum("onboarding_request_status", ["PENDING", "APPROVED", "REJECTED", "CANCELLED"]);
+
+// Teacher join request status
+export const teacherJoinRequestStatusEnum = pgEnum("teacher_join_request_status", ["PENDING", "APPROVED", "REJECTED", "CANCELLED"]);
 
 // ***********************************************************************************
 // LEVEL 1: ORGANISATIONAL LEVEL (SCHOOL AND MEMBERS -TEACHERS AND ADMINS)
@@ -28,7 +40,7 @@ export const organization = pgTable(
     name: varchar("name", { length: 128 }).notNull(),           // === school name
     slug: varchar("slug", { length: 64 }).notNull().unique(),  // === schoolRegistrationId
     logo: varchar("logo", { length: 256 }),
-    // Subscription tier lives at the school level (REGULAR or PRO)
+    // Subscription tier. For future use, hence, the default is REGULAR.
     subscription: varchar("subscription", { length: 16 }).default("REGULAR"),
     // audit
     createdAt: timestamp("created_at").notNull(),
@@ -38,7 +50,7 @@ export const organization = pgTable(
 );
 
 // User Management by Better Auth
-// A user === a teacher or admin. 
+// A user === a teacher, orgadmin or admin (platform admin). 
 export const user = pgTable("user", {
   // Better Auth base fields
   id: text("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -49,10 +61,12 @@ export const user = pgTable("user", {
   // twoFactor plugin field
   twoFactorEnabled: boolean("two_factor_enabled").default(false),
   // // Additional fields (declared in auth-setup.ts additionalFields)
-  firstName: varchar("first_name", { length: 64 }),
-  lastName: varchar("last_name", { length: 64 }),
+  firstName: varchar("first_name", { length: 64 }).notNull(),
+  lastName: varchar("last_name", { length: 64 }).notNull(),
+  signUpRole: signUpRoleEnum("sign_up_role").default("TEACHER"),   // signUpRole: "TEACHER" | "SCHOOL_ADMIN" 
+  onboardingStatus: onboardingStatusEnum("onboarding_status").default("NONE").notNull(),
   // admin plugin fields
-  role: varchar("role", { length: 16 }),   // role: "TEACHER" | "ADMIN" 
+  role: varchar("role", { length: 16 }),   // role: "user" | "orgadmin"  | "admin" 
   banned: boolean("banned").default(false),
   banReason: varchar("ban_reason", { length: 256 }),
   banExpires: timestamp("ban_expires"),
@@ -60,6 +74,57 @@ export const user = pgTable("user", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
 });
+
+// Onboarding Request: When a school admin requests to onboard a new school
+export const onboardingRequest = pgTable("onboarding_request", {
+  // identifier
+  id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+  // user who requested the onboarding
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  // organisation information
+  organisationName: varchar("organisation_name", { length: 128 }).notNull(),
+  organisationAddressLine1: varchar("organisation_address_line_1", { length: 128 }).notNull(),
+  organisationCity: varchar("organisation_city", { length: 128 }).notNull(),
+  organisationState: varchar("organisation_state", { length: 128 }).notNull(),
+  organisationPostalCode: varchar("organisation_postal_code", { length: 32 }).notNull(),
+  organisationCountry: varchar("organisation_country", { length: 128 }).notNull(),
+  // contact information of the admin requesting the onboarding
+  contactEmail: varchar("contact_email", { length: 128 }).notNull(),
+  contactPhone: varchar("contact_phone", { length: 32 }).notNull(),
+  // status of the onboarding request
+  status: onboardingRequestStatusEnum("status").default("PENDING").notNull(),  // PENDING | APPROVED | REJECTED | CANCELLED
+  rejectionReason: varchar("rejection_reason", { length: 256 }),  // if the user is rejected, the reason for rejection
+  // audit
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
+  reviewedBy: text("reviewed_by").references(() => user.id, { onDelete: "set null" }),  // user who reviewed the onboarding request
+  // nullable organisationId after approval
+  organisationId: text("organisation_id").references(() => organization.id, { onDelete: "set null" }),
+}, (table) => [
+  // index("onboarding_request_userId_idx").on(table.userId),
+  index("onboarding_request_status_idx").on(table.status),  // index by status for querying pending requests
+  uniqueIndex("onboarding_request_userId_unique").on(table.userId).where(sql`status = 'PENDING'`),  // only one pending request per user but they can have multiple requests with other statuses
+]);
+
+// When a teacher requests to join a school
+export const teacherJoinRequest = pgTable("teacher_join_request", {
+  // identifier
+  id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+  // user who requested to join the school
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  // organisation they wish to join (via registrationId)
+  organisationId: text("organisation_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  // status of the join request
+  status: teacherJoinRequestStatusEnum("status").default("PENDING").notNull(),  // PENDING | APPROVED | REJECTED | CANCELLED
+  rejectionReason: varchar("rejection_reason", { length: 256 }),  // if the user is rejected, the reason for rejection
+  // audit
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
+}, (table) => [
+  index("teacher_join_request_status_idx").on(table.status), // for querying pending requests 
+  index("teacher_join_request_organisationId_status_idx").on(table.organisationId, table.status), // for querying pending requests for a specific organisation
+  uniqueIndex("teacher_join_request_userId_unique").on(table.userId).where(sql`status = 'PENDING'`),  // only one pending request per user but they can have multiple requests with other statuses
+]);
 
 // Session management
 export const session = pgTable(
@@ -72,9 +137,7 @@ export const session = pgTable(
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()).notNull(),
     ipAddress: text("ip_address"),
     userAgent: text("user_agent"),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
     // Organisation plugin — tracks which school the session is currently active for
     activeOrganizationId: text("active_organization_id"),
     // admin plugin — set when an admin is impersonating another user
@@ -135,7 +198,7 @@ export const twoFactor = pgTable(
 
 // Organisation Plugin Tables
 //  member     → represents a teacher (or admin) within a school (added by admin)
-//  invitation → admin can send an invitation to a teacher by email 
+//  invitation → required by Better Auth org plugin (unused — we use teacher join / onboarding instead)
 // member.role: "teacher" | "admin" (custom roles defined in auth-setup.ts)
 // STATUS FLOW: only one member with role="orgadmin" is allowed per organisation (partial unique index)
 export const member = pgTable(
@@ -157,27 +220,29 @@ export const member = pgTable(
     index("member_userId_idx").on(table.userId),
     // Enforce one admin per school at the database level
     uniqueIndex("member_organization_admin_unique").on(table.organizationId).where(sql`role = 'orgadmin'`),
+    // Enforce one school per user
+    uniqueIndex("member_userId_unique").on(table.userId)
   ],
 );
 
-// An admin invites a teacher by email; on acceptance, a member record is automatically created.
-// STATUS FLOW: pending → accepted | rejected | cancelled
+// Stub table for Better Auth organization plugin — get-full-organization joins this model.
+// App code does not use BA invitations; leave empty.
 export const invitation = pgTable(
   "invitation",
   {
-    // identifier
     id: text("id").primaryKey().default(sql`gen_random_uuid()`),
-    // organisation affiliation (1-1 mapping)
-    organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
-    // email of the teacher to invite
-    email: varchar("email", { length: 128 }).notNull(),
-    role: varchar("role", { length: 16 }).default("teacher").notNull(),    // role to assign on acceptance: "teacher" | "admin"
-    // status of the invitation: "pending" | "accepted" | "rejected" | "cancelled"
-    status: varchar("status", { length: 16 }).default("pending").notNull(),
-    // audit
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role"),
+    status: text("status").default("pending").notNull(),
     expiresAt: timestamp("expires_at").notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
-    inviterId: text("inviter_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    inviterId: text("inviter_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    teamId: text("team_id"),
   },
   (table) => [
     index("invitation_organizationId_idx").on(table.organizationId),
@@ -231,7 +296,11 @@ export const subject = pgTable(
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
   },
   (table) => [
-    unique("subject_organizationId_name_key").on(table.organizationId, table.name),  // unique subject name per organisation
+    // case-insensitive unique name per organisation (matches client duplicate check)
+    uniqueIndex("subject_organizationId_name_ci_key").on(
+      table.organizationId,
+      sql`lower(${table.name})`,
+    ),
     index("subject_organizationId_idx").on(table.organizationId),
   ],
 );
@@ -248,10 +317,10 @@ export const student = pgTable(
     middleName: varchar("middle_name", { length: 128 }),
     lastName: varchar("last_name", { length: 128 }).notNull(),
     dateOfBirth: timestamp("date_of_birth"),
-    gender: genderEnum("gender").default("NONE").notNull(),
+    gender: genderEnum("gender").default("FEMALE").notNull(),
     status: studentStatusEnum("status").default("ACTIVE").notNull(),
     // class assignment — current class (fast operational query); previous assignments stored in classHistory
-    classId: varchar("class_id", { length: 128 }).references(() => organisationClass.id, { onDelete: "set null" }),
+    classId: varchar("class_id", { length: 128 }).references(() => organisationClass.id, { onDelete: "restrict" }),
     // append-only JSON audit log — each entry records a class the student was previously assigned to
     classHistory: json("class_history"),
     // organisation (school) affiliation (1-1 mapping)
@@ -261,6 +330,13 @@ export const student = pgTable(
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
   },
   (table) => [
+    // case-insensitive unique name per organisation (matches client duplicate check)
+    uniqueIndex("student_organizationId_name_ci_key").on(
+      table.organizationId,
+      sql`lower(${table.firstName})`,
+      sql`lower(coalesce(${table.middleName}, ''))`,
+      sql`lower(${table.lastName})`,
+    ),
     index("student_organizationId_idx").on(table.organizationId),
     index("student_classId_idx").on(table.classId),
   ],
@@ -317,7 +393,7 @@ export const gradingEntry = pgTable(
     maxScore: integer("max_score").notNull(),
     remark: varchar("remark", { length: 256 }),
     // academic term affiliation (1-1 mapping)
-    academicTermId: text("academic_term_id").notNull().references(() => academicTerm.id, { onDelete: "cascade" }),
+    academicTermId: text("academic_term_id").notNull().references(() => academicTerm.id, { onDelete: "restrict" }),
     // denormalise organisationId
     organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
     // audit
@@ -325,7 +401,10 @@ export const gradingEntry = pgTable(
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
   },
   (table) => [
-    unique("grading_entry_academicTermId_grade_key").on(table.academicTermId, table.grade), // no two identical grades for the same term
+    uniqueIndex("grading_entry_academicTermId_grade_ci_key").on(
+      table.academicTermId,
+      sql`lower(${table.grade})`,
+    ), // no two identical grades for the same term (case-insensitive)
     index("grading_entry_academicTermId_idx").on(table.academicTermId),
     index("grading_entry_organizationId_idx").on(table.organizationId),
     check("grading_entry_min_max_score_check", sql`min_score <= max_score`),
@@ -345,7 +424,7 @@ export const assessmentStructure = pgTable(
     percentage: integer("percentage").notNull(),     // e.g., 30
     displayOrder: integer("display_order").notNull(), // e.g., 1
     // academic term affiliation (1-1 mapping)
-    academicTermId: text("academic_term_id").notNull().references(() => academicTerm.id, { onDelete: "cascade" }),
+    academicTermId: text("academic_term_id").notNull().references(() => academicTerm.id, { onDelete: "restrict" }),
     // organisation affiliation (denormalisation)
     organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
     // audit
@@ -594,7 +673,6 @@ export const invitationRelations = relations(invitation, ({ one }) => ({
   }),
 }));
 
-
 // ----------------- LEVEL 2: School-scoped -----------------
 export const organisationClassRelations = relations(organisationClass, ({ one, many }) => ({
   organization: one(organization, {
@@ -715,7 +793,7 @@ export const assessmentRelations = relations(assessment, ({ one, many }) => ({
     references: [studentSubjectEnrollment.id],
   }),
   // one assessment can have many scores (shaped by assessment structure)
-  scores: many(assessmentScore),  
+  scores: many(assessmentScore),
 }));
 
 export const assessmentScoreRelations = relations(assessmentScore, ({ one }) => ({

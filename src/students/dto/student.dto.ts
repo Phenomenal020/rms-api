@@ -17,8 +17,8 @@ function toUpperCase({ value }: { value: unknown }) {
 
 // Valid gender values — mirrors the DB genderEnum.
 // The frontend sends lowercase ("male"/"female"); @Transform uppercases before @IsIn validates.
-const GENDER_VALUES = ['NONE', 'MALE', 'FEMALE'] as const;
-const STUDENT_STATUS_VALUES = ['ACTIVE', 'INACTIVE', 'SUSPENDED'] as const;
+const GENDER_VALUES = ['MALE', 'FEMALE'] as const;
+const STUDENT_STATUS_VALUES = ['ACTIVE', 'INACTIVE'] as const;
 
 // Create a student
 export class CreateStudentDto {
@@ -43,8 +43,8 @@ export class CreateStudentDto {
     lastName!: string;
 
     @Transform(toUpperCase)
-    @IsIn(GENDER_VALUES, { message: 'gender must be MALE, FEMALE, or NONE' })
-    gender!: 'NONE' | 'MALE' | 'FEMALE';
+    @IsIn(GENDER_VALUES, { message: 'gender must be MALE or FEMALE' })
+    gender!: 'MALE' | 'FEMALE';
 
     // Optional class assignment on creation (null / omit / "" = unassigned)
     @IsOptional()
@@ -79,12 +79,12 @@ export class UpdateStudentDto {
     // Frontend sends "male"/"female" — @Transform uppercases to match the DB enum.
     @IsOptional()
     @Transform(toUpperCase)
-    @IsIn(GENDER_VALUES, { message: 'gender must be MALE, FEMALE, or NONE' })
-    gender?: 'NONE' | 'MALE' | 'FEMALE';
+    @IsIn(GENDER_VALUES, { message: 'gender must be MALE or FEMALE' })
+    gender?: 'MALE' | 'FEMALE';
 
     @IsOptional()
-    @IsIn(STUDENT_STATUS_VALUES, { message: 'status must be ACTIVE, INACTIVE, or SUSPENDED' })
-    status?: 'ACTIVE' | 'INACTIVE' | 'SUSPENDED';
+    @IsIn(STUDENT_STATUS_VALUES, { message: 'status must be ACTIVE or INACTIVE' })
+    status?: 'ACTIVE' | 'INACTIVE';
 
     // Pass a UUID to assign a class, null to remove, omit to leave unchanged
     @IsOptional()
@@ -120,7 +120,8 @@ export class GetStudentEnrollmentsQueryDto {
     termId!: string;
 }
 
-export class PatchStudentParamsDto {
+// Route param for PATCH /students/:id and DELETE /students/:id
+export class StudentIdParamsDto {
     @IsString()
     @IsNotEmpty()
     @IsUUID()

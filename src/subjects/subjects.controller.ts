@@ -1,7 +1,7 @@
-import { Controller, Get, Post, Patch, Body, Param, HttpCode, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, HttpCode, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { SubjectsService } from './subjects.service';
-import { CreateSubjectDto, UpdateSubjectDto, PatchSubjectParamsDto } from './dto/subject.dto';
+import { CreateSubjectDto, UpdateSubjectDto, SubjectIdParamsDto } from './dto/subject.dto';
 import { OrgAdminGuard } from '../auth/guards/org-admin.guard';
 import { LoggingInterceptor } from '../common/interceptors/logging.interceptor';
 
@@ -29,13 +29,24 @@ export class SubjectsController {
   }
 
   // Update an existing subject that belongs to the authenticated admin's school.
-  @Patch(':id')
+  @Put(':id')
   @HttpCode(200)
   async updateSubject(
     @Session() session: UserSession,
-    @Param() params: PatchSubjectParamsDto,
+    @Param() params: SubjectIdParamsDto,
     @Body() data: UpdateSubjectDto,
   ) {
     return this.subjectsService.updateSubject(session.user.id, params.id, data);
+  }
+
+  // Delete a subject that belongs to the authenticated admin's school.
+  // Fails with 400 if the subject is still assigned to any class (FK RESTRICT).
+  @Delete(':id')
+  @HttpCode(200)
+  async deleteSubject(
+    @Session() session: UserSession,
+    @Param() params: SubjectIdParamsDto,
+  ) {
+    return this.subjectsService.deleteSubject(session.user.id, params.id);
   }
 }

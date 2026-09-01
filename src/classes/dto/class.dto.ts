@@ -2,7 +2,7 @@ import { IsString, IsOptional, IsArray, MinLength, IsNotEmpty, IsUUID, MaxLength
 import { Transform } from 'class-transformer';
 
 function trim({ value }: { value: unknown }) {
-  if (typeof value !== 'string') return null;
+  if (typeof value !== 'string') return value;
   return value.trim();
 }
 
@@ -18,30 +18,28 @@ export class GetClassesQueryDto {
 
 
 // ----------------------- Create Class -----------------------
-// active term id is required to create a class for a specific term.
-export class createClassDto {
-  // Must be a string and still valid after trimming
+// activeTermId is required only when assigning subjects.
+export class CreateClassDto {
   @Transform(trim)
   @IsString()
   @MinLength(1, { message: 'Class name must not be blank' })
+  @MaxLength(64, { message: 'Class name must be at most 64 characters' })
   name!: string;
 
-  // Either a provided uuid or "Not Assigned"
   @IsOptional()
   @IsString()
   @MinLength(1, { message: 'Form teacher must not be blank' })
-  formTeacherId!: string | null;
+  formTeacherId?: string | null;
 
-  // Must be a string, particularly uuid
-  @IsString({ message: 'Invalid active term information provided' })
+  @IsOptional()
   @IsUUID()
-  activeTermId!: string;
+  activeTermId?: string | null;
 
-  // Optional array of subject ids to assign to the class
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(20, { message: 'Maximum of 20 subjects can be assigned to a class' })
-  @ArrayUnique({ each: true }, { message: 'Subjects must be unique' })
+  @ArrayUnique({ message: 'Subjects must be unique' })
+  @IsUUID(undefined, { each: true })
   subjectIds?: string[];
 }
 
@@ -49,26 +47,29 @@ export class createClassDto {
 
 
 // ----------------------- Update Class -----------------------
-export class updateClassDto {
-  // id comes from the route param
+// True PATCH: omit a field to leave it unchanged.
+export class UpdateClassDto {
+  @IsOptional()
   @Transform(trim)
   @IsString()
   @MinLength(1, { message: 'Class name must not be blank' })
-  name!: string;
+  @MaxLength(64, { message: 'Class name must be at most 64 characters' })
+  name?: string;
 
   @IsOptional()
   @IsString()
   @MinLength(1, { message: 'Form teacher must not be blank' })
-  formTeacherId!: string | null;
+  formTeacherId?: string | null;
 
-  @IsString({ message: 'Invalid active term information provided' })
+  @IsOptional()
   @IsUUID()
-  activeTermId!: string;
+  activeTermId?: string | null;
 
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(20, { message: 'Maximum of 20 subjects can be assigned to a class' })
-  @ArrayUnique({ each: true }, { message: 'Subjects must be unique' })
+  @ArrayUnique({ message: 'Subjects must be unique' })
+  @IsUUID(undefined, { each: true })
   subjectIds?: string[];
 }
 

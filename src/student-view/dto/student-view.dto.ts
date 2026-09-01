@@ -1,7 +1,7 @@
 // DTO for saving student assessment scores
 // Inferred from the client payload structure
 
-import { IsUUID, IsInt, Min, Max, IsArray, ArrayMinSize, ValidateNested, IsOptional, IsString, IsNotEmpty, ArrayMaxSize, MaxLength } from 'class-validator';
+import { IsUUID, IsInt, Min, Max, IsArray, ValidateNested, IsOptional, IsString, IsNotEmpty, ArrayMaxSize, MaxLength } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class ScoreDto {
@@ -33,7 +33,6 @@ export class SaveStudentScoresDto {
   academicTermId!: string;
 
   @IsArray()
-  @ArrayMinSize(1)
   @ArrayMaxSize(30)
   @ValidateNested({ each: true })
   @Type(() => SubjectScoresDto)
@@ -70,7 +69,7 @@ export class SaveClassRecordExportDto {
 
   @IsOptional()
   @IsString()
-  @MaxLength(200)
+  @MaxLength(2000, { message: 'Comment must be at most 2000 characters' })
   comment?: string;
 }
 

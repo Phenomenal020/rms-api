@@ -12,7 +12,7 @@ export class CreateTermDto {
     @IsNotEmpty()
     @Transform(trim)
     @MinLength(1, { message: 'Academic year must not be blank' })
-    @MaxLength(16, { message: 'Academic year too short' })
+    @MaxLength(16, { message: 'Academic year must be at most 16 characters' })
     academicYear!: string;
 
     @IsEnum(['FIRST', 'SECOND', 'THIRD'])
@@ -28,7 +28,7 @@ export class CreateTermDto {
     // resulting in a raw Postgres type error instead of a clean 400.
     @IsOptional()
     @IsString()
-    @IsISO8601({}, { message: 'termStart must be a valid date string' })
+    @IsISO8601({}, { message: 'termStart must be a valid date ' })
     termStart?: string;
 
     @IsOptional()

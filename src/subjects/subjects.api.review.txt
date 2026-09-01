@@ -2,6 +2,7 @@
 SUBJECTS API — CODE REVIEW
 Route: api/src/subjects
 Reviewed: 2026-06-22
+Updated: 2026-08-15
 Files: subjects.controller.ts, subjects.service.ts, subjects.module.ts, dto/subject.dto.ts
 Related: auth/schema.ts, auth/org-context.helper.ts, common/filters/*,
          common/interceptors/*, auth/guards/org-admin.guard.ts, app.module.ts, main.ts
@@ -11,20 +12,20 @@ Client counterpart: client/app/(main)/subjects/subjects.review.txt
 
 EXECUTIVE SUMMARY
 --------------------------------------------------------------------------------
-The subjects module is a small, focused org-admin CRUD surface for the permanent
-school-level subject catalogue. It follows the same NestJS + Drizzle patterns as
-classes and term: OrgAdminGuard, global ValidationPipe, requireOrganizationId on
-mutations, and runWithDbContext for Postgres error mapping on writes. Strengths
-include implicit org ownership on PATCH via WHERE organizationId, and a clear
-separation between controller and service.
+The subjects module is a focused org-admin CRUD surface for the permanent
+school-level subject catalogue. It follows NestJS + Drizzle patterns used by
+classes and term: OrgAdminGuard, global ValidationPipe, requireOrganizationId,
+runWithDbContext for Postgres error mapping, ok() envelope, LoggingInterceptor.
 
-The main gaps are: (1) response envelope — FIXED (success: true on all handlers);
-(2) org scoping on GET — FIXED (requireOrganizationId + subject.organizationId
-filter); (3) DTO gaps — UpdateSubjectDto comment says PATCH semantics but name is
-required; (4) getSubjects runWithDbContext — FIXED; (5) no DELETE endpoint while
-downstream tables RESTRICT subject deletion; (6) LoggingInterceptor on controller —
-FIXED. Database design for subject as an org-scoped catalogue entity is sound;
-cascade behaviour correctly protects assignments and enrollments.
+Current surface: GET list, POST create, PUT update, DELETE remove — all org-scoped.
+Ownership on write/delete is enforced via WHERE id AND organizationId (cross-org →
+404). Duplicate names are blocked case-insensitively via uniqueIndex on
+(organizationId, lower(name)). DELETE is blocked by subject_class_assignment
+ON DELETE RESTRICT (23503 → clear 400). GET normalises null department → 'none'.
+
+Prior gaps closed (2026-08-15): response envelope, GET org scoping, @IsIn /
+@MaxLength, runWithDbContext on GET, LoggingInterceptor, DELETE endpoint,
+case-insensitive unique name, department null mapping on read.
 
 
 1) MIDDLEWARE — How can it be used here? Is it being used correctly?
@@ -41,32 +42,15 @@ How middleware applies to /api/v1/subjects
   layer for cross-cutting transport concerns that do not need DI:
 
   A) Request ID + logging (already wired app-wide) ✅
-     AllExceptionsFilter reads request.requestId on errors. Subjects endpoints
-     benefit automatically — no module changes needed.
-
   B) Body size guard (already wired) ✅
-     Subject payloads are tiny (name + department). The 100 kb JSON limit in
-     main.ts is more than sufficient.
-
   C) Rate limiting (optional, route-scoped) 📌
-     POST and PATCH are single-statement writes today, but if abuse is a concern
-     apply a mutation rate limiter the same way as classes:
-
-       consumer
-         .apply(mutationRateLimiter)
-         .forRoutes(
-           { path: 'subjects', method: RequestMethod.POST },
-           { path: 'subjects/:id', method: RequestMethod.PATCH },
-         );
-
-  D) Request logging latency (already app-wide via requestLogger) ✅
-     Complements optional per-controller LoggingInterceptor (see §5).
+     Consider mutation rate limiter for POST / PUT / DELETE like classes.
+  D) Request logging latency (app-wide requestLogger) ✅
 
 What NOT to put in middleware for this route
-  • Org resolution — needs DB; belongs in service (requireOrganizationId) or a
-    custom guard with DI.
-  • Department enum validation — belongs in DTO / ValidationPipe.
-  • Auth — already handled by global AuthGuard + OrgAdminGuard.
+  • Org resolution — service (requireOrganizationId) or DI guard.
+  • Department enum validation — DTO / ValidationPipe.
+  • Auth — global AuthGuard + OrgAdminGuard.
 
 Verdict: Middleware is used correctly at the app level. Subjects needs no
 module-specific middleware unless you add mutation rate limits.
@@ -76,138 +60,63 @@ module-specific middleware unless you add mutation rate limits.
 --------------------------------------------------------------------------------
 
 How they work in NestJS (and in this project)
-  • Exception filters catch thrown errors after the route pipeline runs.
   • AllExceptionsFilter is registered globally in main.ts.
-  • Flow: HttpException → status + body; Postgres errors on unhandled paths →
-    mapPostgresError(context 'generic'); everything else → 500 + logged stack.
-  • Service mutations wrap work in runWithDbContext('subject', ...) which maps
-    PG codes before they reach the filter.
+  • Service work wraps in runWithDbContext('subject', ...) which maps PG codes
+    before they reach the filter.
 
-Subjects-specific usage today
-  • createSubject and updateSubject use runWithDbContext('subject', ...). ✅
-  • getSubjects does NOT use runWithDbContext — unexpected DB errors become
-    generic 500s via AllExceptionsFilter with context 'generic'.
-  • Service throws NotFoundException on PATCH when no row matches id + org.
+Subjects-specific usage
+  • getSubjects, createSubject, updateSubject, deleteSubject all use
+    runWithDbContext('subject', ...). ✅
+  • NotFoundException on PUT/DELETE when no row matches id + org.
   • requireOrganizationId throws UnauthorizedException / ForbiddenException
     before mutations run.
 
 Mapped errors relevant to subjects
   • 23505 + context 'subject' → 409 Conflict
     "A subject with this name already exists in your school"
-    (constraint: subject_organizationId_name_key)
-  • 23503 + context 'subject' → not specialised today; falls through to
-    generic "Operation conflicts with existing related records" if DELETE is
-    added later while subject_class_assignment rows exist.
+    (constraint: subject_organizationId_name_ci_key — case-insensitive)
+  • 23503 + context 'subject' → 400 BadRequest
+    "Cannot delete this subject because it is assigned to one or more classes.
+     Remove class assignments first." ✅
 
-Improvements
-
-  A) Wrap getSubjects in runWithDbContext (high)
-     Align read path with mutations and classes module post-review:
-
-       return runWithDbContext('subject', 'Failed to fetch subjects', async () => {
-         const subjects = await this.db.select(...)...;
-         return { success: true, data: subjects };
-       });
-       FIX: Wrapped with runWithDbContext() ✅
-
-  B) Fix response envelope vs ResponseTransformInterceptor (high — see §5, §7)
-     Service returns { success: 'Subjects fetched successfully', data: [...] }.
-     ResponseTransformInterceptor.isApiResponse() checks success === true (boolean).
-     String success is NOT recognised, so the interceptor double-wraps:
-
-       { success: true, data: { success: 'Subjects fetched successfully', data: [...] } }
-
-     Client getSubjects() does data.data — receives the inner envelope object, not
-     the subject array. Standardise on { success: true, data, message? } like
-     classes.service.ts after its review fixes.
-     FIX: Changed response to success: true, data: T ✅
-
-  C) Extend postgres-error.mapper for subject 23503 (medium — when DELETE added)
-       case 'subject':
-         return new BadRequestException(
-           'Cannot delete this subject because it is assigned to one or more classes. ' +
-             'Remove class assignments first.',
-         );
-      FIX: Extended ✅
-
-  D) SubjectsExceptionFilter (optional, low)
-     Only needed for domain error codes (e.g. SUBJECT_NAME_TAKEN). Global filter +
-     mapper is sufficient for current scope. ✅
+Improvements status
+  A) Wrap getSubjects in runWithDbContext ✅
+  B) Response envelope success: true via ok() ✅
+  C) postgres-error.mapper subject 23503 for DELETE ✅
+  D) SubjectsExceptionFilter — not needed; global filter + mapper sufficient ✅
 
 
 3) PIPES — General use and improvements for this route
 --------------------------------------------------------------------------------
 
 How pipes work
-  • Pipes transform and/or validate inputs before the handler runs.
   • Global ValidationPipe (main.ts): whitelist, forbidNonWhitelisted, transform,
     stopAtFirstError, 422 on validation failure.
 
 Current usage in subjects
   • @Body() CreateSubjectDto / UpdateSubjectDto
-  • @Param() PatchSubjectParamsDto
+  • @Param() SubjectIdParamsDto (PUT + DELETE)
   • All rely on the global pipe; no route-specific pipes.
 
-Gaps and recommendations
+Gaps and recommendations — status
 
-  A) Department enum validation missing (high)
-     Service comments reference @IsIn but dto/subject.dto.ts has only @IsString.
-     Client (subjects-form.tsx) restricts department to:
-       none | commerce | science | arts | general
+  A) Department enum validation
+     @IsIn(['none','commerce','science','arts','general']) on create + update ✅
 
-     Server accepts any non-empty string → data integrity drift and confusing
-     class subject listings (classes.service maps null department to 'none').
+  B) UpdateSubjectDto is full-replace (PUT), not partial PATCH
+     name + department required. Client always sends both. Documented as PUT ✅
+     True optional PATCH deferred 📌 (would need client refactor)
 
-     Fix in CreateSubjectDto / UpdateSubjectDto:
+  C) Department sentinel
+     Client sends "none"; GET maps null → 'none'. Create may store "none" string.
+     Literal 'none' convention kept for now ✅
+     Optional later: store null for "none" on write 📌
 
-       const DEPARTMENT_VALUES = ['none', 'commerce', 'science', 'arts', 'general'] as const;
+  D) @MaxLength(128) on name and department ✅
 
-       @IsIn(DEPARTMENT_VALUES, { message: 'department must be a valid department' })
-       department!: string;
-       FIX: Included IsIn ✅
+  E) SubjectIdParamsDto @IsUUID() on :id ✅
 
-  B) UpdateSubjectDto should be a true PATCH DTO (high)
-     Comment: "All fields are optional".
-     Reality: name is required (@IsString without @IsOptional).
-
-     Client edit flow always sends name + department, so no bug today. API
-     contract is wrong for partial updates. Fix:
-
-       @IsOptional()
-       @IsString()
-       @IsNotEmpty()
-       @Transform(trim)
-       name?: string;
-
-     Service must guard: if Object.keys(subjectUpdateData).length === 0 → 400
-     "No fields to update".
-     FIX: To be Implemented later (requires client refactor) 📌
-
-  C) Department sentinel normalisation (medium)
-     Client sends department: "none". Service stores literal "none" in DB on
-     create; classes read path maps null → 'none'. Inconsistent storage.
-
-     Option 1 — DTO @Transform: value === 'none' ? null : value (store null).
-     Option 2 — keep "none" string everywhere and map null → 'none' on GET
-     (match classes.service.ts line ~116).
-
-     Pick one convention and document in DTO comments.
-
-
-     FIX: Left 'none' literal for now ✅
-
-  D) @MaxLength(128) on name and department (medium)
-     Schema: varchar(128). DTO has no max length → DB error or truncation risk.
-     Add @MaxLength(128) to match schema.
-     FIX: Added @MaxLength(128) to match schema ✅
-
-  E) ParseUUIDPipe on :id (low)
-     PatchSubjectParamsDto with @IsUUID() is fine and consistent with classes/term.
-     FIX: Leave as is ✅
-
-  F) Custom pipe for duplicate-name pre-check (low)
-     Unique constraint + mapper 409 is sufficient; pre-check adds a race anyway.
-     FIX: Unique constraint in db enough ✅
+  F) Duplicate-name pre-check pipe — not needed; CI unique + 409 ✅
 
 
 4) GUARDS — General use and current / improved usage
@@ -219,27 +128,14 @@ Guard execution order (this app)
   3. Handler
 
 Current state — adequate for admin-only catalogue management
-  • All three endpoints require org admin. ✅
+  • GET / POST / PUT / DELETE require org admin. ✅
   • Unauthorized responses are deliberately generic (no resource leakage). ✅
 
 Possible additions
-
   A) ActiveOrganisationGuard (medium) 📌
-     requireOrganizationId uses the first member row (limit 1, no ORDER BY).
-     getSubjects joins member without limiting to one org — if a user has
-     multiple memberships they could see subjects from all orgs on GET while
-     mutations target only the first org. Unlikely for orgadmin-only route but
-     worth hardening when multi-org sessions land.
-
-  B) Do NOT add guards for org scoping on reads
-     Organisation scoping belongs in service WHERE clauses. Mutations already
-     enforce via organizationId in UPDATE/INSERT. GET should use the same
-     requireOrganizationId + eq(subject.organizationId, orgId) pattern instead of
-     an unbounded member join. ✅
-
-  C) TeacherRoleGuard — not applicable
-     Subjects catalogue is admin-managed; teachers consume subjects via classes
-     and enrollments, not this route. ✅
+     requireOrganizationId uses first member row; harden when multi-org sessions land.
+  B) Organisation scoping on reads — in service WHERE clauses ✅
+  C) TeacherRoleGuard — not applicable ✅
 
 
 5) INTERCEPTORS — General use and improvements for this route
@@ -247,46 +143,14 @@ Possible additions
 
 Current state
   • Global: TimeoutInterceptor (15 s), ResponseTransformInterceptor.
-  • SubjectsController uses @UseInterceptors(LoggingInterceptor) — parity with
-    classes. ✅
-  • Service returns { success: true, data } on GET, POST, and PATCH — passes
-    through ResponseTransformInterceptor without double-wrap. ✅
+  • SubjectsController @UseInterceptors(LoggingInterceptor) ✅
+  • Service returns ok(data) → { success: true, data } — no double-wrap ✅
 
-How interceptors affect subjects today
-
-  A) ResponseTransformInterceptor (high — bug)
-     Subjects service returns success as string messages. Interceptor only passes
-     through bodies where success === true. All subject endpoints get double-wrapped
-     responses (see §2B). Fix service returns to match ApiResponse interface:
-
-       return { success: true, data: subjects, message: 'Subjects fetched successfully' };
-
-     Or return raw data / use @SkipResponseTransform() until envelopes are unified.
-     FIX: getSubjects, createSubject, and updateSubject all return
-     { success: true, data: T } in subjects.service.ts. Interceptor passes through
-     without re-wrapping. ✅
-
-  B) LoggingInterceptor (medium)
-     Add to SubjectsController for parity with classes:
-
-       @UseInterceptors(LoggingInterceptor)
-
-     Logs userId, handler, durationMs — complements app-wide requestLogger.
-     FIX: @UseInterceptors(LoggingInterceptor) on SubjectsController (subjects.controller.ts). ✅
-
-  C) TimeoutInterceptor (low)
-     Single-query GET and single-statement writes are fast; global 15 s timeout
-     is sufficient.
-     FIX: Wired globally in main.ts via TimeoutInterceptor(15_000); no subjects-
-     specific change required. ✅
-
-  D) CacheInterceptor (low)
-     GET /subjects is org-scoped and changes on POST/PATCH. Prefer client SWR
-     (already used); skip server HTTP cache unless you add etag invalidation.
-     FIX: SWR Used ✅
-
-  E) ClassSerializerInterceptor (low)
-     Only relevant once response DTOs use @Exclude() for internal fields.
+  A) ResponseTransformInterceptor — fixed via ok() ✅
+  B) LoggingInterceptor on controller ✅
+  C) TimeoutInterceptor global — sufficient ✅
+  D) CacheInterceptor — skip; client SWR ✅
+  E) ClassSerializerInterceptor — optional later with response DTOs 📌
 
 
 6) DTOs — Request and response
@@ -294,47 +158,18 @@ How interceptors affect subjects today
 
 Request DTOs (dto/subject.dto.ts)
 
-  | DTO                 | Used on              | Issues |
-  |---------------------|----------------------|--------|
-  | CreateSubjectDto    | POST /subjects       | department required but comment says "default none"; no @IsIn enum; no @MaxLength |
-  | UpdateSubjectDto    | PATCH /subjects/:id  | name required — contradicts PATCH comment; department allows null but client sends enum string only |
-  | PatchSubjectParamsDto | PATCH /subjects/:id | Good — @IsUUID on id |
+  | DTO                 | Used on                 | Status |
+  |---------------------|-------------------------|--------|
+  | CreateSubjectDto    | POST /subjects          | trim, MaxLength, IsIn ✅ |
+  | UpdateSubjectDto    | PUT /subjects/:id       | full replace; name + department required ✅ |
+  | SubjectIdParamsDto  | PUT + DELETE /:id       | @IsUUID ✅ |
 
-  Local trim() helper duplicates pattern in other modules; consider extracting to
-  common/validators/trim.ts (P2, same as classes review).
+  Local trim() helper duplicates other modules; extract later 📌
 
-Response DTOs — missing entirely
-
-  Recommended types (typing, OpenAPI, client code-gen):
-
-  // GET /subjects — list item
-  class SubjectListItemDto {
-    id: string;
-    name: string;
-    department: string | null;  // or always string if normalised to 'none'
-    createdAt: Date;
-    updatedAt: Date;
-  }
-
-  // POST /subjects
-  class CreateSubjectResponseDto {
-    success: true;
-    data: SubjectListItemDto;
-    message?: string;
-  }
-
-  // PATCH /subjects/:id
-  class UpdateSubjectResponseDto {
-    success: true;
-    data: SubjectListItemDto;
-    message?: string;
-  }
-
-  Client types/subjects.ts currently types success: string — update when API
-  standardises on boolean success + optional message.
-
-  POST returns full created row via .returning() — good for optimistic UI; client
-  still refetches via mutate('/api/v1/subjects') which is fine.
+Response DTOs — missing (typing / OpenAPI) 📌
+  Recommended: SubjectListItemDto, Create/Update/Delete response wrappers.
+  POST/PUT/DELETE return full row via .returning() — good for clients; client
+  still refetches via mutate(SUBJECTS_KEY).
 
 
 7) CODE QUALITY — What could be improved?
@@ -342,248 +177,118 @@ Response DTOs — missing entirely
 
 Strengths
   • Clear controller / service split; thin controller. ✅
-  • Org ownership on UPDATE via WHERE id + organizationId — no extra SELECT. ✅
-  • Mutations use runWithDbContext with 'subject' context. ✅
-  • SubjectsService exported from module for future reuse. ✅
-  • PatchSubjectParamsDto validates UUID param format. ✅
+  • Org ownership on UPDATE/DELETE via WHERE id + organizationId. ✅
+  • All handlers use runWithDbContext('subject', ...). ✅
+  • SubjectsService exported from module. ✅
+  • SubjectIdParamsDto shared by PUT and DELETE. ✅
+  • Dead createSubject variable / unnecessary transaction removed. ✅
 
-Issues
+Issues — status
 
-  A) Response envelope vs global interceptor (high)
-     success: string on all three handlers breaks ResponseTransformInterceptor.
-     Align with classes: success: true, optional message. See §2B, §5A.
-     FIX: All handlers return success: true in subjects.service.ts. ✅
-     FIX: Implemented ✅
-
-  B) Org scoping inconsistency on GET (high)
-     getSubjects: INNER JOIN member ON subject.organizationId = member.organizationId
-     WHERE member.userId = userId — returns subjects for every org the user
-     belongs to.
-     createSubject / updateSubject: requireOrganizationId → first member row only.
-
-     Fix getSubjects:
-
-       const organizationId = await requireOrganizationId(this.db, userId);
-       const subjects = await this.db
-         .select({ ... })
-         .from(subject)
-         .where(eq(subject.organizationId, organizationId))
-         .orderBy(asc(subject.createdAt));
-
-     Simpler query, correct semantics, matches mutations.
-     FIX: getSubjects uses requireOrganizationId + eq(subject.organizationId,
-     organisationId); member join removed (subjects.service.ts). ✅
-
-  C) Debug console.log left in production code (high)
-     subjects.service.ts line ~35:
-       console.log("subjects from database", subjects);
-     Remove before merge.
-     FIX: Removed ✅
-
-  D) Unnecessary transaction on create (low)
-     createSubject wraps a single INSERT in db.transaction(). Harmless but adds
-     overhead; a direct insert + runWithDbContext is enough unless you plan
-     multi-statement creates (e.g. default assessment templates per subject).
-     FIX: Removed transaction ✅
-
-  E) DTO / service comment drift (medium)
-     Comments mention @IsIn; DTO does not implement it. UpdateSubjectDto PATCH
-     comment vs required name field.
-     FIX: Implemented ✅
-
-  F) department null vs "none" (medium)
-     create stores client "none" as varchar; GET returns raw DB value; classes
-     API normalises null → 'none'. Subjects list may show null department in UI
-     for legacy rows. Normalise on read or write (see §3C).
-     FIX: Kept 'none' ✅
-
-  G) No LoggingInterceptor on controller (low)
-     Classes has it; subjects does not. Add for observability parity.
-     FIX: @UseInterceptors(LoggingInterceptor) on SubjectsController. ✅
-
-  H) No GET by id / DELETE endpoints (product)
-     Catalogue is list + create + patch only. Acceptable if intentional; document
-     lifecycle (subjects are permanent; unassign from classes before any future
-     delete). Client only needs list + modals today.
-     TODO: To be Implemented
-
-  I) Duplicate trim helper (low)
-     Same local function as other DTO files; extract when touching common validators.
-     FIX: Leave as is. Not a big deal ✅
+  A) Response envelope vs interceptor — FIXED ✅
+  B) GET org scoping — FIXED (requireOrganizationId + eq organizationId) ✅
+  C) console.log in getSubjects — FIXED (removed) ✅
+  D) Unnecessary transaction on create — FIXED ✅
+  E) DTO / comment drift (@IsIn, PUT vs PATCH) — FIXED ✅
+  F) department null vs "none" on GET — FIXED (map after fetch) ✅
+  G) LoggingInterceptor — FIXED ✅
+  H) DELETE endpoint — FIXED ✅
+     Still no soft-delete / archival product path 📌
+  I) Duplicate trim helper — leave as is ✅
+  J) requireOrganizationId outside runWithDbContext on writes
+     Org-lookup DB errors lack 'subject' context — low; leave or wrap later 📌
 
 
 8) ERROR HANDLING
 --------------------------------------------------------------------------------
 
 What works
-  • Duplicate subject name → 409 via mapPostgresError + subject_organizationId_name_key. ✅
-  • PATCH on foreign / missing subject id → 404 NotFoundException. ✅
-  • User with no org on mutation → 403 via requireOrganizationId. ✅
-  • Non-admin → 401 via OrgAdminGuard. ✅
-  • Validation errors → 422 via global ValidationPipe. ✅
-  • Mutation unexpected PG errors → runWithDbContext fallback 500 with message. ✅
+  • Duplicate subject name (any case) → 409 via CI unique + mapper ✅
+  • PUT/DELETE foreign / missing subject id → 404 ✅
+  • User with no org on mutation → 403 via requireOrganizationId ✅
+  • Non-admin → 401 via OrgAdminGuard ✅
+  • Validation errors → 422 via global ValidationPipe ✅
+  • DELETE with class assignments → 400 (23503 subject branch) ✅
+  • Unexpected PG errors → runWithDbContext fallback 500 ✅
 
-Gaps
-
-  | Scenario                              | Current behaviour              | Recommended |
-  |---------------------------------------|--------------------------------|-------------|
-  | Duplicate subject name on POST/PATCH  | 409 — clear message            | OK ✅ |
-  | PATCH subject in another org          | 404 (no row updated)           | OK ✅ |
-  | GET subjects DB failure               | Generic 500 (no context)       | runWithDbContext on read |
-  | Invalid department string             | 201/200 stored in DB           | @IsIn on DTO |
-  | Name > 128 chars                      | Possible DB error → 500        | @MaxLength(128) |
-  | User multi-org membership on GET      | Scoped to requireOrganizationId org | OK ✅ |
-  | Double-wrapped success response       | success: true on all handlers  | OK ✅ |
-  | Whitespace-only name after trim       | @IsNotEmpty fails → 422        | OK ✅ |
-  | Unknown body fields                   | 422 forbidNonWhitelisted       | OK ✅ |
-  | Future DELETE with class assignments  | 23503 generic message          | Mapper branch for 'subject' |
-  | User has no member row on GET         | Empty array (join returns [])  | Consider 403 like mutations |
-
-  Validation errors: global pipe returns 422 — client getApiErrorMessage handles
-  these in subjects-form.tsx.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  | Scenario                              | Behaviour                         | Status |
+  |---------------------------------------|-----------------------------------|--------|
+  | Duplicate name (same/different case)  | 409                               | ✅ |
+  | PUT/DELETE subject in another org     | 404                               | ✅ |
+  | GET subjects DB failure               | runWithDbContext 500              | ✅ |
+  | Invalid department                     | 422 @IsIn                         | ✅ |
+  | Name > 128 chars                      | 422 @MaxLength                    | ✅ |
+  | Multi-org membership on GET           | Scoped to requireOrganizationId   | ✅ |
+  | Response envelope                     | success: true                     | ✅ |
+  | Whitespace-only name after trim       | 422                               | ✅ |
+  | Unknown body fields                   | 422 forbidNonWhitelisted          | ✅ |
+  | DELETE with class assignments         | 400 clear message                 | ✅ |
 
 
 9) TEST CASES
 --------------------------------------------------------------------------------
 
-No subjects.spec.ts exists (only app.controller.spec.ts in the project).
-Below: unit tests (service, mocked DB) and e2e tests (supertest + test DB).
+No subjects.spec.ts exists yet. Recommended coverage:
 
 ─── SubjectsController (e2e / integration) ───
 
 Auth & authorization
-  [P0] GET /subjects without session → 401
-  [P0] GET /subjects as non-orgadmin teacher → 401
-  [P0] GET /subjects as orgadmin with valid session → 200
+  [P0] GET/POST/PUT/DELETE without session → 401
+  [P0] Same as non-orgadmin → 401
+  [P0] Orgadmin with valid session → success status
 
 GET /subjects
-  [P0] Org with no subjects → 200, data: [] (or envelope with empty array)
-  [P0] Org with subjects → 200, each item has id, name, department, createdAt, updatedAt
-  [P1] User with no member row → 200 [] today; consider 403 after alignment
-  [P1] User with two org memberships → only first org's subjects after GET fix;
-       today may return subjects from both orgs (regression test after fix)
-  [P2] Response shape: success === true (boolean), not double-wrapped
-  [P2] Subjects ordered by createdAt ascending
+  [P0] No subjects → 200, data: []
+  [P0] With subjects → items have id, name, department, createdAt, updatedAt
+  [P1] Null department in DB → 'none' in response
+  [P2] success === true; ordered by createdAt asc
 
 POST /subjects
-  [P0] Valid name + department "science" → 201, subject returned in data
-  [P0] Duplicate name in same org → 409
-  [P0] Duplicate name in different org → 201 (names are org-scoped)
-  [P1] department "none" → stored per chosen convention (null or "none")
-  [P1] Omit department → 422 (required on CreateSubjectDto today)
-  [P1] Invalid department value → 422 after @IsIn added
-  [P2] Empty name / whitespace-only name → 422
-  [P2] Name length 129 → 422 after @MaxLength
-  [P2] Unknown body fields → 422 (forbidNonWhitelisted)
-  [P2] User with no org → 403
+  [P0] Valid name + department → 201
+  [P0] Duplicate name same org (exact or different case) → 409
+  [P0] Same name different org → 201
+  [P1] Invalid department → 422
+  [P2] Empty / whitespace name → 422; length 129 → 422
 
-PATCH /subjects/:id
-  [P0] Update name on owned subject → 200, updated row in data
-  [P0] Update name to duplicate of another subject in same org → 409
-  [P0] Update subject in another org (valid UUID) → 404
-  [P0] Invalid subject id format → 422
-  [P0] Non-existent subject id → 404
-  [P1] Update department only (after PATCH DTO fix) → 200, name unchanged
-  [P1] Update name only, omit department → 200, department unchanged
-  [P1] Send department: null → null in DB (if supported)
-  [P1] Concurrent PATCH same subject → last write wins; unique name still enforced
-  [P2] PATCH with empty body → 422 or 400 "no fields to update"
+PUT /subjects/:id
+  [P0] Update owned subject → 200
+  [P0] Rename to duplicate (any case) → 409
+  [P0] Other org / missing id → 404
+  [P0] Invalid UUID → 422
 
-─── SubjectsService (unit, mocked Drizzle) ───
+DELETE /subjects/:id
+  [P0] Delete unassigned owned subject → 200
+  [P0] Delete while subject_class_assignment exists → 400
+  [P0] Other org / missing id → 404
+  [P0] Invalid UUID → 422
 
-getSubjects
-  [P0] requireOrganizationId returns orgId → query filters subject.organizationId
-  [P1] Zero rows → { success: true, data: [] }
-  [P1] Maps department null → 'none' if normalisation added
-
-createSubject
-  [P0] Inserts with organizationId from requireOrganizationId
-  [P1] department undefined → null in DB (if DTO optionalised)
-  [P1] PG 23505 → ConflictException via runWithDbContext
-
-updateSubject
-  [P0] Builds partial payload — only sent fields
-  [P0] No matching row → NotFoundException
-  [P1] name-only update does not clear department
-  [P1] department: null clears department column
-
-─── DTO validation (unit) ───
-
-  [P1] CreateSubjectDto rejects blank name after trim
-  [P1] CreateSubjectDto rejects invalid department after @IsIn
-  [P1] PatchSubjectParamsDto rejects non-UUID id
-  [P1] UpdateSubjectDto rejects empty name when name is provided
-
-─── Postgres error mapper (unit) ───
-
-  [P1] 23505 + 'subject' → ConflictException with subject name message
-  [P2] 23503 + 'subject' → BadRequestException with assignment message (when added)
+─── SubjectsService (unit) ───
+  [P0] GET filters by organizationId; maps null department
+  [P0] create/update/delete use org id; delete NotFound when no row
+  [P1] PG 23505 / 23503 mapped via runWithDbContext
 
 
 10) DB DESIGN ISSUES (given business logic from the API)
 --------------------------------------------------------------------------------
 
-Domain model (as implemented)
-  • subject — org-scoped permanent catalogue entry (name + optional department).
-  • subjectClassAssignment — links subject to class + term (many-to-many over time).
-  • studentSubjectEnrollment → assessment chain hangs off assignments, not subject
-    directly.
+Domain model
+  • subject — org-scoped permanent catalogue (name + optional department).
+  • subjectClassAssignment — links subject to class + term.
+  • studentSubjectEnrollment → assessments hang off assignments.
 
 Alignment
-  • API correctly treats subjects as school-level entities that persist across
-    terms; class modules assign them per term via subjectClassAssignment. ✅
-  • No academicTermId on subject table — matches "permanent entity" comment in
-    schema.ts. ✅
-  • Org admin manages catalogue; teachers interact via classes/students modules. ✅
+  • API treats subjects as school-level entities across terms ✅
+  • No academicTermId on subject — permanent entity ✅
+  • Org admin manages catalogue ✅
 
-Design concerns
+Design concerns — status
 
-  A) No DELETE endpoint (product / lifecycle)
-     subject.id is referenced by subjectClassAssignment ON DELETE RESTRICT.
-     Deleting a subject requires removing all class assignments first (and
-     enrollments before that). API has no DELETE — acceptable if subjects are
-     never removed; document archival strategy (soft-delete flag?) if schools
-     need to retire subjects from pickers without breaking historical records.
-
-  B) department as free varchar (medium)
-     Schema allows any string up to 128 chars; client uses a fixed enum. No CHECK
-     or enum type in DB — invalid values can enter via API or migrations. Align
-     DTO @IsIn with optional CHECK constraint or Postgres enum type.
-
-  C) "none" vs NULL semantics (medium)
-     department column is nullable. Application uses both null and literal "none"
-     depending on code path. Pick one canonical "no department" representation.
-
-  D) Subject rename with active assignments (OK)
-     Renaming updates the catalogue row; assignments reference subjectId FK —
-     class listings show new name automatically. Correct.
-
-  E) Cross-org subject id reuse in class assignment (OK — prevented)
-     classes.service validates subjectIds belong to org before insert. Subject
-     UUID from another school cannot be assigned even if guessed.
-
-  F) Commented department table relation (low)
-     schema.ts line ~523: // departments: many(department) — department is a
-     string field, not FK. Fine for MVP; a department table would normalise if
-     schools need configurable departments.
+  A) DELETE endpoint — implemented; RESTRICT protects assigned subjects ✅
+     Soft-delete / retire-from-pickers without breaking history still optional 📌
+  B) department free varchar — DTO @IsIn; optional DB CHECK later 📌
+  C) "none" vs NULL — GET normalises to 'none'; write may store "none" ✅
+  D) Rename with active assignments — OK (FK by id) ✅
+  E) Cross-org assignment prevented in classes module ✅
 
 
 11) DB / SCHEMA OPTIMISATION (schema.ts — subject and dependents)
@@ -591,68 +296,58 @@ Design concerns
 
 subject table
   • PK: text UUID default gen_random_uuid() — OK.
-  • FK organizationId → organization ON DELETE RESTRICT — OK (cannot delete
-    school while subjects exist; cleanup subjects first).
-  • UNIQUE (organizationId, name) — matches duplicate-name business rule.
-    Case-sensitive today; "Math" and "math" can coexist. Consider citext on name
-    or functional unique index on lower(name) if case-insensitive uniqueness is
-    desired (classes review noted same for class names).
-  • INDEX (organizationId) — good for GET /subjects list by org.
-  • department varchar(128) nullable — OK; add CHECK or enum if hardening.
-  • updatedAt with $onUpdate — OK for audit.
+  • FK organizationId → organization ON DELETE RESTRICT — OK.
+  • UNIQUE case-insensitive:
+      uniqueIndex("subject_organizationId_name_ci_key").on(
+        organizationId, sql`lower(name)`
+      )
+    Matches client duplicate check and classes CI pattern. ✅
+    Apply with: pnpm drizzle-kit push
+    If push fails, resolve existing case-variant duplicates first.
+  • INDEX (organizationId) — OK.
+  • department varchar(128) nullable — OK.
+  • updatedAt $onUpdate — OK.
 
-subjectClassAssignment (downstream — affects subject lifecycle)
-  • FK subjectId → subject ON DELETE RESTRICT — cannot delete subject while
-    assigned to any class/term. API must unassign via classes PATCH first.
-  • UNIQUE (organisationClassId, subjectId, academicTermId) — prevents duplicate
-    assignment; classes diff logic relies on this.
-  • Indexes on organisationClassId, subjectId, organizationId, academicTermId —
-    good for class list and enrollment queries.
+subjectClassAssignment
+  • FK subjectId ON DELETE RESTRICT — DELETE subject blocked while assigned ✅
+  • UNIQUE (organisationClassId, subjectId, academicTermId) — OK.
 
-studentSubjectEnrollment (further downstream)
-  • RESTRICT on subjectClassAssignmentId — cannot delete assignment while
-    students enrolled. Error surfaces in classes module, not subjects.
+Cascade summary
+  • INSERT/UPDATE — no cascades.
+  • DELETE subject — BLOCKED if assignments exist (23503).
+  • DELETE organization — BLOCKED by RESTRICT chain.
 
-Cascade summary for subject operations
-  • INSERT subject → no cascades.
-  • UPDATE subject name/department → no cascades; assignments keep subjectId.
-  • DELETE subject (not exposed) → BLOCKED if subject_class_assignment rows exist
-    (23503 RESTRICT).
-  • DELETE organization → BLOCKED by RESTRICT chain through subject.
-
-Optional schema hardening
-  • CHECK (length(trim(name)) > 0) on subject.name.
-  • CHECK (department IS NULL OR department IN ('none','commerce','science','arts','general')).
-  • citext extension + unique (organizationId, lower(name)) for case-insensitive names.
-  • Partial index not needed at current scale; organizationId index suffices for list.
+Optional hardening 📌
+  • CHECK length(trim(name)) > 0
+  • CHECK department IS NULL OR IN (...enum...)
+  • Soft-delete / archival flag if schools need to hide subjects from pickers
 
 
 PRIORITISED ACTION LIST
 --------------------------------------------------------------------------------
 
 P0 — Correctness / security / client breakage
-  1. Standardise responses: success: true (boolean), optional message — fix
-     double-wrap with ResponseTransformInterceptor. ✅
-  2. Fix getSubjects org scoping: use requireOrganizationId + filter on
-     subject.organizationId (not unbounded member join). ✅
-  3. Remove console.log from subjects.service.ts.
-  4. Wrap getSubjects in runWithDbContext('subject', ...).
+  1. success: true envelope via ok() ✅
+  2. GET org scoping ✅
+  3. Remove console.log ✅
+  4. runWithDbContext on getSubjects ✅
+  5. DELETE endpoint + org-scoped delete + 23503 mapping ✅
+  6. Case-insensitive unique name index ✅ (push to DB)
 
 P1 — Consistency / validation
-  5. Add @IsIn department enum to CreateSubjectDto and UpdateSubjectDto.
-  6. Fix UpdateSubjectDto: @IsOptional on name; 400 when empty PATCH body.
-  7. Add @MaxLength(128) on name and department.
-  8. Normalise department null vs "none" on read or write (match classes).
-  9. Add @UseInterceptors(LoggingInterceptor) on SubjectsController. ✅
-  10. Add subjects.service.spec.ts and subjects e2e tests for P0 cases.
+  7. @IsIn department + @MaxLength(128) ✅
+  8. Update as PUT (required fields); true PATCH later 📌
+  9. Normalise null department on GET ✅
+  10. LoggingInterceptor ✅
+  11. subjects.service.spec.ts / e2e for P0 cases 📌
 
 P2 — Polish / future
-  11. Remove unnecessary transaction wrapper on single INSERT create.
-  12. Response DTO types for OpenAPI / client code-gen.
-  13. Extract shared trim helper to common/validators.
-  14. postgres-error.mapper branch for subject 23503 when DELETE is added.
-  15. Evaluate citext for subject.name uniqueness.
-  16. Document or implement subject retirement (soft-delete / DELETE endpoint).
+  12. Mutation rate limit for POST/PUT/DELETE 📌
+  13. Response DTO types / OpenAPI 📌
+  14. Extract shared trim helper 📌
+  15. Soft-delete / subject retirement product path 📌
+  16. Store null for department "none" on write (optional convention) 📌
+  17. Wrap requireOrganizationId inside runWithDbContext on writes 📌
 
 ================================================================================
 END OF REVIEW

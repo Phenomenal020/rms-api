@@ -40,13 +40,15 @@ export class CreateAssessmentStructureDto {
 
 
 export class UpdateAssessmentEntryDto {
-  @IsUUID()
   @IsOptional()
-  id!: string | null;
+  @Transform(({ value }) => (value === null ? undefined : value))
+  @IsUUID()
+  id?: string;
 
   @IsString()
   @IsNotEmpty()
   @Transform(trim)
+  @MaxLength(16, { message: 'Assessment name too long' })
   type!: string;
 
   @IsNumber()
@@ -65,6 +67,7 @@ export class UpdateAssessmentStructureDto {
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => UpdateAssessmentEntryDto)
+  @ArrayMaxSize(10, { message: 'Maximum 10 assessment entries allowed' })
   entries!: UpdateAssessmentEntryDto[];
 }
 

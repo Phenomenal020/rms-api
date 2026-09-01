@@ -8,6 +8,7 @@ import { eq, and, inArray } from 'drizzle-orm';
 import { validateAssessmentEntries } from './assessment-structure.validation';
 import { CreateAssessmentStructureDto, UpdateAssessmentStructureDto, UpdateAssessmentEntryDto, CreateAssessmentEntryDto } from './dto/assessment-structure.dto';
 import * as schema from '../auth/schema';
+import { ok } from '../common/utils/api-response';
 
 @Injectable()
 export class AssessmentStructureService {
@@ -37,10 +38,7 @@ export class AssessmentStructureService {
           })
           .from(assessmentStructure)
           .where(and(eq(assessmentStructure.academicTermId, termId), eq(assessmentStructure.organizationId, organisationId)));
-        return {
-          success: true,
-          data: rows,
-        };
+        return ok(rows);
       },
     );
   }
@@ -81,9 +79,11 @@ export class AssessmentStructureService {
               organizationId: organisationId,
             })),
           );
-          return { success: 'Assessment structure created successfully', data: null };
-        })
-      })
+        });
+
+        return ok(null);
+      },
+    );
   }
 
   // Update assessment structure for a term. PATCH /assessment-structure/{termId}
@@ -111,10 +111,8 @@ export class AssessmentStructureService {
     const toUpdate: UpdateAssessmentEntryDto[] = [];  // Entries to update
     // Case 2: Insert a new entry (not in db but in payload)
     const toInsert: CreateAssessmentEntryDto[] = [];  // Entries to insert
-    // Case 3: Delete an entry (exists in db and not in payload)
-    const toDelete: UpdateAssessmentEntryDto[] = [];  // Entries to delete
     // Invalid entries
-    // Case 4: Invalid ids (not in db and not in payload)
+    // Case 4: Invalid ids (in payload but not in db)
     const invalidIds: string[] = [];  // Invalid ids
 
     // Partition the entries into the four cases
@@ -189,7 +187,7 @@ export class AssessmentStructureService {
           }
         });
 
-        return { success: 'Assessment structure updated successfully', data: null };
+        return ok(null);
       },
     );
   }

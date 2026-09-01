@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsOptional, IsUUID, IsIn, MaxLength } from 'class-validator';
+import { IsString, IsNotEmpty, IsUUID, IsIn, MaxLength } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 function trim({ value }: { value: unknown }) {
@@ -25,7 +25,7 @@ export class CreateSubjectDto {
   department!: string;
 }
 
-// PATCH /subjects/:id — update a subject that already belongs to the user's school.
+// PUT /subjects/:id — update a subject that already belongs to the user's school.
 // All fields are still sent in the payload (for now...)
 export class UpdateSubjectDto {
   @IsString()
@@ -34,7 +34,6 @@ export class UpdateSubjectDto {
   @MaxLength(128, { message: "Subject name is too long" })
   name!: string
 
-  // Send null to remove the department affiliation.
   @IsString()
   @IsNotEmpty()
   @Transform(trim)
@@ -43,8 +42,8 @@ export class UpdateSubjectDto {
   department!: string;
 }
 
-// Only the id is required for the patch route param
-export class PatchSubjectParamsDto {
+// Route param for PUT /subjects/:id and DELETE /subjects/:id
+export class SubjectIdParamsDto {
   @IsString()
   @IsNotEmpty()
   @IsUUID()

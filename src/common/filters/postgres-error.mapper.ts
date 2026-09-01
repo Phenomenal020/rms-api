@@ -10,6 +10,7 @@ export type PgErrorContext =
   | 'student'
   | 'organisation'
   | 'user'
+  | 'onboarding'
   | 'generic';
 
 export function mapPostgresError(
@@ -82,6 +83,14 @@ export function mapPostgresError(
             'A pending request for this class in this term already exists. Please wait for admin approval or cancel the existing request.',
           );
         }
+        if (
+          pg.constraint === 'student_organizationId_name_ci_key' ||
+          pg.constraint?.includes('student_organizationId_name')
+        ) {
+          return new ConflictException(
+            'A student with this name already exists in your school',
+          );
+        }
         return new ConflictException(
           'This student is already enrolled in one or more of the selected subjects',
         );
@@ -90,6 +99,26 @@ export function mapPostgresError(
           return new ConflictException('An account with this email already exists');
         }
         return new ConflictException('User profile conflict');
+      case 'onboarding':
+        // Partial unique index: only one PENDING onboarding_request per user
+        if (
+          pg.constraint === 'onboarding_request_userId_unique' ||
+          pg.constraint?.includes('onboarding_request_userId')
+        ) {
+          return new ConflictException(
+            'You already have a pending onboarding request. Please wait for a decision before submitting another.',
+          );
+        }
+        // Partial unique index: only one PENDING teacher_join_request per user
+        if (
+          pg.constraint === 'teacher_join_request_userId_unique' ||
+          pg.constraint?.includes('teacher_join_request_userId')
+        ) {
+          return new ConflictException(
+            'You already have a pending join request. Please wait for your school admin to respond before submitting another.',
+          );
+        }
+        return new ConflictException('Onboarding request conflict');
       default:
         return new ConflictException('Resource already exists');
     }
@@ -112,9 +141,20 @@ export function mapPostgresError(
             'The selected form teacher is no longer valid. Please choose another teacher.',
           );
         }
+        if (
+          pg.constraint?.includes('student_subject_enrollment') ||
+          pg.message?.includes('student_subject_enrollment') ||
+          pg.constraint?.includes('subject_class_assignment_id') ||
+          pg.message?.includes('subject_class_assignment_id')
+        ) {
+          return new BadRequestException(
+            'Cannot remove subject(s) from this class because students are already enrolled. ' +
+            'Please unenrol students from those subjects first.',
+          );
+        }
         return new BadRequestException(
-          'Cannot remove subject(s) from this class because students are already enrolled. ' +
-          'Please unenrol students from those subjects first.',
+          'Cannot delete this class because it still has related records ' +
+          '(subject assignments or export requests). Remove those first.',
         );
       case 'subject':
         return new BadRequestException(
@@ -123,13 +163,23 @@ export function mapPostgresError(
         );
       case 'term':
         return new BadRequestException(
-          'Cannot delete this term because it is still linked to classes, enrollments, or other records. ' +
-          'Remove or reassign those records first.',
+          'Cannot delete this term because it still has related records ' +
+          '(grading system, assessment structure, class assignments, enrollments, or export requests). ' +
+          'Remove those first.',
         );
       case 'student':
+        if (
+          pg.constraint?.includes('student_subject_enrollment_id') ||
+          pg.message?.includes('student_subject_enrollment_id')
+        ) {
+          return new BadRequestException(
+            'Cannot remove subject enrollment because assessment scores exist for this student. ' +
+            'Remove or clear those scores before unenrolling.',
+          );
+        }
         return new BadRequestException(
-          'Cannot remove subject enrollment because assessment scores exist for this student. ' +
-          'Remove or clear those scores before unenrolling.',
+          'Cannot delete this student because they are enrolled in one or more subjects. ' +
+          'Remove those enrollments first.',
         );
       case 'organisation':
         if (

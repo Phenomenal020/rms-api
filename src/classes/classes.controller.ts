@@ -1,7 +1,7 @@
-import { Controller, Get, Post, Patch, Body, Param, HttpCode, Query, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, HttpCode, Query, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { ClassesService } from './classes.service';
-import { createClassDto, updateClassDto, GetClassesQueryDto, GetClassEnrollmentsQueryDto, PatchClassParamsDto } from './dto/class.dto';
+import { CreateClassDto, UpdateClassDto, GetClassesQueryDto, GetClassEnrollmentsQueryDto, PatchClassParamsDto } from './dto/class.dto';
 import { OrgAdminGuard } from '../auth/guards/org-admin.guard';
 import { LoggingInterceptor } from '../common/interceptors/logging.interceptor';
 // 
@@ -39,7 +39,7 @@ export class ClassesController {
   @HttpCode(201)
   async createClass(
     @Session() session: UserSession,
-    @Body() data: createClassDto,
+    @Body() data: CreateClassDto,
   ) {
     return this.classesService.createClass(session.user.id, data);
   }
@@ -51,8 +51,19 @@ export class ClassesController {
   async updateClass(
     @Session() session: UserSession,
     @Param() params: PatchClassParamsDto,
-    @Body() data: updateClassDto,
+    @Body() data: UpdateClassDto,
   ) {
     return this.classesService.updateClass(session.user.id, params.id, data);
+  }
+
+  // Delete a class that belongs to the authenticated admin's school.
+  // Fails with 400 while subject assignments or export requests still reference it (FK RESTRICT).
+  @Delete(':id')
+  @HttpCode(200)
+  async deleteClass(
+    @Session() session: UserSession,
+    @Param() params: PatchClassParamsDto,
+  ) {
+    return this.classesService.deleteClass(session.user.id, params.id);
   }
 }

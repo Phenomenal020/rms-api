@@ -2,12 +2,26 @@ import { Injectable, BadRequestException, NotFoundException, Inject } from '@nes
 import { runWithDbContext } from '../common/filters/run-with-db-context';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
-import { academicTerm, member } from '../auth/schema';
-import { requireOrganizationId, requireOwnerOrganizationId } from '../auth/org-context.helper';
+import { academicTerm } from '../auth/schema';
+import { requireOrganizationId } from '../auth/org-context.helper';
 import { eq, and, desc, ne } from 'drizzle-orm';
 import { CreateTermDto, UpdateTermDto } from './dto/term.dto';
 import { validateTermDates } from './term-validation';
 import * as schema from '../auth/schema';
+import { ok } from '../common/utils/api-response';
+
+const termColumns = {
+  id: academicTerm.id,
+  academicYear: academicTerm.academicYear,
+  term: academicTerm.term,
+  termDays: academicTerm.termDays,
+  termStart: academicTerm.termStart,
+  termEnd: academicTerm.termEnd,
+  status: academicTerm.status,
+  organizationId: academicTerm.organizationId,
+  createdAt: academicTerm.createdAt,
+  updatedAt: academicTerm.updatedAt,
+};
 
 @Injectable()
 export class TermService {
@@ -20,25 +34,14 @@ export class TermService {
   // Get all academic terms for the authenticated user's organisation
   async getTerms(userId: string) {
     return runWithDbContext('term', 'Failed to fetch terms', async () => {
+      const organisationId = await requireOrganizationId(this.db, userId);
       const terms = await this.db
-        .select({
-          id: academicTerm.id,
-          academicYear: academicTerm.academicYear,
-          term: academicTerm.term,
-          termDays: academicTerm.termDays,
-          termStart: academicTerm.termStart,
-          termEnd: academicTerm.termEnd,
-          status: academicTerm.status,
-          organizationId: academicTerm.organizationId,
-          createdAt: academicTerm.createdAt,
-          updatedAt: academicTerm.updatedAt,
-        })
-        .from(member)
-        .innerJoin(academicTerm, eq(academicTerm.organizationId, member.organizationId))
-        .where(eq(member.userId, userId))
+        .select(termColumns)
+        .from(academicTerm)
+        .where(eq(academicTerm.organizationId, organisationId))
         .orderBy(desc(academicTerm.createdAt));
 
-      return { success: true, data: terms };
+      return ok(terms);
     });
   }
 
@@ -54,7 +57,7 @@ export class TermService {
       'Failed to create term. Please check your inputs and try again.',
       async () => {
         const organisationId = await requireOrganizationId(this.db, userId);
-        await this.db.insert(academicTerm)
+        const [created] = await this.db.insert(academicTerm)
           .values({
             academicYear: termData.academicYear,
             term: termData.term,
@@ -62,8 +65,9 @@ export class TermService {
             termStart: termData.termStart ? new Date(termData.termStart) : null,
             termEnd: termData.termEnd ? new Date(termData.termEnd) : null,
             organizationId: organisationId,
-          });
-        return { success: true, data: null };
+          })
+          .returning(termColumns);
+        return ok(created);
       },
     );
   }
@@ -71,14 +75,6 @@ export class TermService {
   // Update an existing academic term (dates and days only)
   // academicYear and term enum are immutable — they define the term's identity
   async updateTerm(userId: string, termId: string, termData: UpdateTermDto) {
-    // Cross-field date validation
-    const dateCheck = validateTermDates(termData.termStart, termData.termEnd);
-    if (!dateCheck.isValid) {
-      throw new BadRequestException(dateCheck.error);
-    }
-
-    const organisationId = await requireOrganizationId(this.db, userId);
-
     // Build update payload — only include mutable fields explicitly provided.
     const updateData: Partial<typeof academicTerm.$inferInsert> = {};
     if (termData.termDays !== undefined) updateData.termDays = termData.termDays ?? null;
@@ -90,7 +86,37 @@ export class TermService {
     }
 
     return runWithDbContext('term', 'Failed to update term', async () => {
-      await this.db.transaction(async (tx) => {
+      const organisationId = await requireOrganizationId(this.db, userId);
+
+      // Check if the term exists and belongs to the organisation
+      const [existing] = await this.db
+        .select({
+          id: academicTerm.id,
+          termStart: academicTerm.termStart,
+          termEnd: academicTerm.termEnd,
+        })
+        .from(academicTerm)
+        .where(
+          and(
+            eq(academicTerm.id, termId),
+            eq(academicTerm.organizationId, organisationId),
+          ),
+        )
+        .limit(1);
+      if (!existing) {
+        throw new NotFoundException('Term not found for this school. Update failed.');
+      }
+
+      // If so, validate the row as it will exist after this PATCH (incoming over stored)
+      const dateCheck = validateTermDates(
+        termData.termStart !== undefined ? termData.termStart : existing.termStart,
+        termData.termEnd !== undefined ? termData.termEnd : existing.termEnd,
+      );
+      if (!dateCheck.isValid) {
+        throw new BadRequestException(dateCheck.error);
+      }
+
+      const updated = await this.db.transaction(async (tx) => {
         if (termData.status === 'ACTIVE') {
           await tx
             .update(academicTerm)
@@ -104,8 +130,7 @@ export class TermService {
             );
         }
 
-        // Now, update the term
-        const [updated] = await tx
+        const [row] = await tx
           .update(academicTerm)
           .set(updateData)
           .where(
@@ -114,15 +139,38 @@ export class TermService {
               eq(academicTerm.organizationId, organisationId),
             ),
           )
-          .returning({ id: academicTerm.id });
+          .returning(termColumns);
 
-        // If the term is not found, throw a not found exception
-        if (!updated) {
+        if (!row) {
           throw new NotFoundException('Term not found for this school. Update failed.');
         }
+        return row;
       });
 
-      return { success: true, data: null };
+      return ok(updated);
+    });
+  }
+
+  // Delete a term that belongs to the authenticated user's school.
+  // FK RESTRICT on grading, assessment structure, assignments, enrollments, and
+  // export requests blocks delete while those rows exist (mapped to 400).
+  async deleteTerm(userId: string, termId: string) {
+    return runWithDbContext('term', 'Failed to delete term', async () => {
+      const organisationId = await requireOrganizationId(this.db, userId);
+      const [deleted] = await this.db
+        .delete(academicTerm)
+        .where(
+          and(
+            eq(academicTerm.id, termId),
+            eq(academicTerm.organizationId, organisationId),
+          ),
+        )
+        .returning(termColumns);
+
+      if (!deleted) {
+        throw new NotFoundException('Term not found for this school. Delete failed.');
+      }
+      return ok(deleted);
     });
   }
 }

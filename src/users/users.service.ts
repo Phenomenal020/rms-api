@@ -3,8 +3,8 @@ import { runWithDbContext } from '../common/filters/run-with-db-context';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
 import * as schema from '../auth/schema';
-import { user } from '../auth/schema';
-import { eq } from 'drizzle-orm';
+import { onboardingRequest, teacherJoinRequest, user } from '../auth/schema';
+import { desc, eq, and } from 'drizzle-orm';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
 // UsersService
@@ -37,26 +37,59 @@ export class UsersService {
 
   async getUser(userId: string) {
     return runWithDbContext('user', 'Failed to fetch user', async () => {
-      const [userData] = await this.db
-        .select({
-          id: user.id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          createdAt: user.createdAt,
-          updatedAt: user.updatedAt,
-        })
-        .from(user)
-        .where(eq(user.id, userId))
-        .limit(1);
+      const tx = await this.db.transaction(async (tx) => {
+        // fetch the user data using the userId. Include the rejection reason of the user's latest omboarding or join request if the user has one.
+        const [userData] = await tx
+          .select({
+            id: user.id,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            signUpRole: user.signUpRole,
+            onboardingStatus: user.onboardingStatus,
+            createdAt: user.createdAt,
+            updatedAt: user.updatedAt,
+            twoFactorEnabled: user.twoFactorEnabled,
+            emailVerified: user.emailVerified,
+          })
+          .from(user)
+          .where(eq(user.id, userId))
+          .limit(1);
+        if (!userData) {
+          throw new NotFoundException('User not found');
+        }
 
-      if (!userData) {
-        throw new NotFoundException('User not found');
-      }
+        // fetch the user's latest onboarding request based on their signed up role
+        switch (userData.signUpRole) {
+          case "SCHOOL_ADMIN":
+            const [userOnboardingRequest] = await tx
+              .select({
+                rejectionReason: onboardingRequest.rejectionReason,
+              })
+              .from(onboardingRequest)
+              .where(and(eq(onboardingRequest.userId, userId), eq(onboardingRequest.status, "REJECTED")))  // only rejected requests have rejection reasons anyway
+              .orderBy(desc(onboardingRequest.createdAt))
+              .limit(1);
+            return { ...userData, rejectionReason: userOnboardingRequest?.rejectionReason ?? null };
 
-      return userData;
+          case "TEACHER":
+            const [userTeacherJoinRequest] = await tx
+              .select({
+                rejectionReason: teacherJoinRequest.rejectionReason,
+              })
+              .from(teacherJoinRequest)
+              .where(and(eq(teacherJoinRequest.userId, userId), eq(teacherJoinRequest.status, "REJECTED")))  // only rejected requests have rejection reasons anyway  
+              .orderBy(desc(teacherJoinRequest.createdAt))
+              .limit(1);
+            return { ...userData, rejectionReason: userTeacherJoinRequest?.rejectionReason ?? null };
+
+          default:
+            return { ...userData, rejectionReason: null };
+        }
+      });
+      return tx;
     });
   }
 }

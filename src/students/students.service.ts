@@ -2,11 +2,12 @@ import { Injectable, BadRequestException, NotFoundException, Inject } from '@nes
 import { runWithDbContext } from '../common/filters/run-with-db-context';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
-import { student, member, studentSubjectEnrollment, subjectClassAssignment } from '../auth/schema';
+import { student, studentSubjectEnrollment, subjectClassAssignment } from '../auth/schema';
 import { requireOrganizationId, requireTermInOrganization, requireClassInOrganization, requireStudentInOrganization } from '../auth/org-context.helper';
 import { eq, and, asc, inArray } from 'drizzle-orm';
 import { CreateStudentDto, UpdateStudentDto, SaveEnrollmentDto } from './dto/student.dto';
 import * as schema from '../auth/schema';
+import { ok } from '../common/utils/api-response';
 
 @Injectable()
 export class StudentsService {
@@ -36,7 +37,7 @@ export class StudentsService {
         .from(student)
         .where(eq(student.organizationId, organisationId))
         .orderBy(asc(student.createdAt));
-      return { success: true, data: students };
+      return ok(students);
     });
   }
 
@@ -50,21 +51,17 @@ export class StudentsService {
     }
     // Finally, create the student
     return runWithDbContext('student', 'Failed to create student', async () => {
-      await this.db.transaction(async (tx) => {
-        await tx
-          .insert(student)
-          .values({
-            firstName: data.firstName,
-            middleName: data.middleName ?? null,
-            lastName: data.lastName,
-            gender: data.gender ?? 'FEMALE',
-            organizationId: organisationId,
-            status: 'ACTIVE',
-            classId: data.classId ?? null,
-            classHistory: [],
-          });
-      });
-      return { success: true, data: null };
+      const [newStudent] = await this.db.insert(student).values({
+          firstName: data.firstName,
+          middleName: data.middleName ?? null,
+          lastName: data.lastName,
+          gender: data.gender,
+          organizationId: organisationId,
+          status: 'ACTIVE',
+          classId: data.classId ?? null,
+          classHistory: [],
+        }).returning();
+      return ok(newStudent);
     });
   }
 
@@ -87,31 +84,61 @@ export class StudentsService {
     if (data.lastName !== undefined) studentUpdateData.lastName = data.lastName;
     if (data.gender !== undefined) studentUpdateData.gender = data.gender;
     if (data.status !== undefined) studentUpdateData.status = data.status;
-    // Handle class change — append old class to history if the class is actually changing (TODO)
-    if (data.classId !== undefined && data.classId !== existingStudent.classId) {
-      // const oldClassId = existingStudent.classId;
-      // Validate the new classId belongs to this school (skip when clearing to null)
+    const classIdChanged =
+      data.classId !== undefined && data.classId !== existingStudent.classId;
+    if (classIdChanged) {
       if (data.classId) {
         await requireClassInOrganization(this.db, organisationId, data.classId);
       }
-      // Set the new classId
       studentUpdateData.classId = data.classId;
     }
     // If there are no fields to update, throw an error
     if (Object.keys(studentUpdateData).length === 0) {
       throw new BadRequestException('No fields to update');
     }
-    // Finally, update the student with the update data
+    // Class change retires old enrollments in the same transaction.
+    // Assessment FK is RESTRICT, so scored enrollments map to 400 via 23503.
     return runWithDbContext('student', 'Failed to update student', async () => {
-      const [updated] = await this.db
-        .update(student)
-        .set(studentUpdateData)
+      return this.db.transaction(async (tx) => {
+        // If the class id has changed, delete all enrollments for the student
+        if (classIdChanged) {
+          await tx
+            .delete(studentSubjectEnrollment)
+            .where(
+              and(
+                eq(studentSubjectEnrollment.studentId, studentId),
+                eq(studentSubjectEnrollment.organizationId, organisationId),
+              ),
+            );
+        }
+        // Also update the student's class id
+        const [updated] = await tx
+          .update(student)
+          .set(studentUpdateData)
+          .where(and(eq(student.id, studentId), eq(student.organizationId, organisationId)))
+          .returning();
+        if (!updated) {
+          throw new NotFoundException('Student not found');
+        }
+        return ok(updated);
+      });
+    });
+  }
+
+  // Delete a student that belongs to the authenticated user's school.
+  // FK RESTRICT on student_subject_enrollment blocks delete while enrollments exist
+  // (mapped to a clear 400 via runWithDbContext + postgres-error.mapper).
+  async deleteStudent(userId: string, studentId: string) {
+    const organisationId = await requireOrganizationId(this.db, userId);
+    return runWithDbContext('student', 'Failed to delete student', async () => {
+      const [deleted] = await this.db
+        .delete(student)
         .where(and(eq(student.id, studentId), eq(student.organizationId, organisationId)))
         .returning();
-      if (!updated) {
+      if (!deleted) {
         throw new NotFoundException('Student not found');
       }
-      return { success: true, data: updated };
+      return ok(deleted);
     });
   }
 
@@ -135,9 +162,9 @@ export class StudentsService {
         .where(and(eq(student.classId, classId), eq(student.organizationId, organisationId)))
         .orderBy(asc(student.createdAt));
       if (students.length === 0) {
-        return { success: true, data: [] };
+        return ok([]);
       }
-      // Fetch all enrollments for the students in the class
+      // Enrollments for this class + term only (not leftover rows from a previous class)
       const enrollments = await this.db
         .select({
           enrollmentId: studentSubjectEnrollment.id,
@@ -145,10 +172,16 @@ export class StudentsService {
           assignmentId: studentSubjectEnrollment.subjectClassAssignmentId,
         })
         .from(studentSubjectEnrollment)
+        .innerJoin(
+          subjectClassAssignment,
+          eq(subjectClassAssignment.id, studentSubjectEnrollment.subjectClassAssignmentId),
+        )
         .where(
           and(
             inArray(studentSubjectEnrollment.studentId, students.map((s) => s.studentId)),
             eq(studentSubjectEnrollment.academicTermId, termId),
+            eq(studentSubjectEnrollment.organizationId, organisationId),
+            eq(subjectClassAssignment.organisationClassId, classId),
           ),
         )
         .orderBy(asc(studentSubjectEnrollment.createdAt));
@@ -175,7 +208,7 @@ export class StudentsService {
         enrollments: enrolledByStudentId.get(s.studentId) ?? [],
       }));
 
-      return { success: true, data: studentsWithEnrollments };
+      return ok(studentsWithEnrollments);
     });
   }
 
@@ -234,11 +267,14 @@ export class StudentsService {
       existingEnrollments.map((e) => [e.subjectClassAssignmentId, e]),
     );
 
-    // 3) Insertion: in payload but not in db -> toInsertArray.
+    // Only sync this class's assignments — never insert/delete another class's leftover rows.
+    const existingForThisClass = existingEnrollments.filter((e) =>
+      allowedAssignmentIds.has(e.subjectClassAssignmentId),
+    );
+
     const toInsertArray = [...payloadAssignmentIds].filter((id) => !existingByAssignmentId.has(id));
 
-    // 4) Deletion: in db but not in payload -> toDeleteArray.
-    const toDeleteArray = existingEnrollments
+    const toDeleteArray = existingForThisClass
       .filter((e) => !payloadAssignmentIds.has(e.subjectClassAssignmentId))
       .map((e) => e.id);
 
@@ -272,7 +308,10 @@ export class StudentsService {
           }
         });
 
-        return { success: true, data: null };
+        return ok({
+          studentId: payload.studentId,
+          enrolledSubjectIds: payload.enrolledSubjectIds,
+        });
       },
     );
   }

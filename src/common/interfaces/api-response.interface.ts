@@ -1,5 +1,6 @@
-export interface ApiResponse<T = unknown> {
-  success: true;
-  data: T;
-  message?: string;  // optional message to be returned to the client
+export interface ApiResponse<T> {
+  success: boolean;
+  data: T | null;
+  error: string | null;
+  statusCode: number;
 }

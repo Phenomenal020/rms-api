@@ -76,7 +76,7 @@ Current usage
   • GetTeacherClassesQueryDto, GetClassRecordQueryDto — query UUIDs + messages. ✅
   • SaveStudentScoresDto, SubjectScoresDto, ScoreDto — @ValidateNested. ✅
   • SaveClassRecordExportDto — classId, academicTermId, optional comment. ✅
-  • SaveStudentScoresDto @ArrayMinSize(1) on studentSubjects. ✅
+  • SaveStudentScoresDto @ArrayMaxSize(30) on studentSubjects. Empty array allowed. ✅
 
 Gaps
 

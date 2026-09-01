@@ -25,10 +25,9 @@ export default async function emailTemplate({
       text: text || "",
       html: html || text || "",
     });
-
     return response;
   } catch (error) {
-    console.error(error);
+    console.error(error);  // Todo: Use nestjs logger
     throw error;
   }
 }

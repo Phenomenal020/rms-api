@@ -7,6 +7,7 @@ import { subject } from '../auth/schema';
 import { requireOrganizationId } from '../auth/org-context.helper';
 import { eq, and, asc } from 'drizzle-orm';
 import { CreateSubjectDto, UpdateSubjectDto } from './dto/subject.dto';
+import { ok } from '../common/utils/api-response';
 
 @Injectable()
 export class SubjectsService {
@@ -27,21 +28,26 @@ export class SubjectsService {
         .select({
           id: subject.id,
           name: subject.name,
-          department: subject.department ?? 'none',
+          department: subject.department,
           createdAt: subject.createdAt,
           updatedAt: subject.updatedAt,
         })
         .from(subject)
         .where(eq(subject.organizationId, organisationId))
         .orderBy(asc(subject.createdAt));
-      return { success: true, data: subjects };
+      return ok(subjects.map(subject => ({
+        id: subject.id,
+        name: subject.name,
+        department: subject.department ?? 'none', // transform null to 'none'
+        createdAt: subject.createdAt,
+        updatedAt: subject.updatedAt,
+      })));
     });
   }
 
   // Create a new subject linked to the authenticated user's school.
   async createSubject(userId: string, data: CreateSubjectDto) {
     // DTO + global ValidationPipe handles validation and transformation (trim, IsIn, etc.)
-    let newSubject: typeof subject.$inferSelect | undefined;
     // Get the organisation id for the authenticated user
     const organisationId = await requireOrganizationId(this.db, userId);
     // Use that to create the new subject
@@ -52,7 +58,7 @@ export class SubjectsService {
           department: data.department ?? null,
           organizationId: organisationId,
         }).returning();
-      return { success: true, data: newSubject };
+      return ok(newSubject);
     })
   };
 
@@ -83,7 +89,24 @@ export class SubjectsService {
       if (!updated) {
         throw new NotFoundException('Subject not found');
       }
-      return { success: true, data: updated };
+      return ok(updated);
+    });
+  }
+
+  // Delete an existing subject that belongs to the authenticated user's school.
+  // FK RESTRICT on subject_class_assignment blocks delete while assignments exist
+  // (mapped to a clear 400 via runWithDbContext + postgres-error.mapper).
+  async deleteSubject(userId: string, subjectId: string) {
+    const organisationId = await requireOrganizationId(this.db, userId);
+    return runWithDbContext('subject', 'Failed to delete subject', async () => {
+      const [deleted] = await this.db
+        .delete(subject)
+        .where(and(eq(subject.id, subjectId), eq(subject.organizationId, organisationId)))
+        .returning();
+      if (!deleted) {
+        throw new NotFoundException('Subject not found');
+      }
+      return ok(deleted);
     });
   }
 }

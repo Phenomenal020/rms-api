@@ -29,6 +29,19 @@ classId in payload — ambiguous when same subject exists in multiple classes;
 (8) 500 stub should be 501 Not Implemented until ready. Read path dependency
 on student-view is intentional for form-teacher subject pivot UI.
 
+Open question (left as is): How would you account for score banks for
+teachers who are not form teachers?
+
+N+1 on saveSubjectScores (logged, not batched yet)
+  saveSubjectScores is one db.transaction (atomic — correct). Inside it still
+  walks payload.studentsData one student at a time and round-trips per row:
+    SELECT student → (once per class) form-teacher check → SELECT assignment
+    → SELECT enrollment → SELECT assessment (INSERT if missing)
+    → per score column INSERT ... ON CONFLICT UPDATE assessment_score.
+  Latency scales with roster size, not correctness. ~40 students × 3 scores is
+  on the order of 160+ queries. Later: IN (...) loads + bulk insert assessments
+  + bulk upsert scores. Defer until table edit is wired.
+
 
 1) MIDDLEWARE — How can it be used here? Is it being used correctly?
 --------------------------------------------------------------------------------
@@ -224,6 +237,10 @@ No subject-view–specific tables.
 
 Implementation uses existing chain:
   subjectClassAssignment → studentSubjectEnrollment → assessment → assessment_score
+
+N+1 (saveSubjectScores) — logged, left as is
+  Per-student sequential SELECTs + score upserts inside the transaction.
+  Atomicity is fine; save time grows linearly with class size. Batch later.
 
 Optional future schema
   • subjectClassAssignment.teacherId → subject-teacher role for non–form-teachers. 📌

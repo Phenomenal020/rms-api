@@ -1,11 +1,9 @@
 // Dummy auth instance used only by the Better Auth CLI to generate schema/migrations.
 // Manually kept in sync with the plugins and additionalFields in auth-setup.ts.
 // Usage: run `pnpm run auth:generate`
-
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { betterAuth } from "better-auth";
 import { emailOTP, twoFactor, organization, admin as adminPlugin } from "better-auth/plugins";
-
 import { ac, orgadmin, admin, user } from "./permissions";
 
 export const auth = betterAuth({
@@ -13,32 +11,62 @@ export const auth = betterAuth({
     provider: 'pg',
   }),
 
+  // Email and Password authentication
   emailAndPassword: {
     enabled: true,
     requireEmailVerification: true,
+    revokeSessionsOnPasswordReset: true,
+    resetPasswordTokenExpiresIn: 10 * 60, // 600 seconds = 10 minutes
+    customSyntheticUser: ({ coreFields, additionalFields, id }) => (
+      {
+        ...coreFields,
+        role: "user",
+        banned: false,
+        banReason: null,
+        banExpires: null,
+        twoFactorEnabled: false,
+        ...additionalFields,
+        id
+      }
+    )
   },
 
+  // User schema
   user: {
     additionalFields: {
       // role is managed by the admin plugin — not declared here
       firstName: {
         type: "string",
         input: true,
+        required: true,
       },
       lastName: {
         type: "string",
         input: true,
+        required: true,
+      },
+      signUpRole: {
+        type: "string",
+        input: true,
+        required: true,
+      },
+      onboardingStatus: {
+        type: ["NONE", "PENDING", "APPROVED", "REJECTED", "CANCELLED"],
+        input: false,
+        required: true,
+        defaultValue: "NONE",
       },
       // subscription removed from user — it lives on the organization (school) instead
     },
     changeEmail: {
-      enabled: false,
+      enabled: false,  // do not allow users to change their email
     },
     deleteUser: {
-      enabled: false,
+      enabled: false,  // do not allow users to delete their account
     },
   },
 
+  // Email verification
   emailVerification: {
     autoSignInAfterVerification: true,
     sendOnSignUp: false, // link-based send is disabled; OTP is sent via emailOTP.sendVerificationOnSignUp
@@ -52,13 +80,13 @@ export const auth = betterAuth({
       expiresIn: 5 * 60,
       allowedAttempts: 2,
       sendVerificationOnSignUp: true,
-      async sendVerificationOTP() {},
+      async sendVerificationOTP() { },
     }),
     twoFactor({
       skipVerificationOnEnable: true,
       otpOptions: {
         period: 5,
-        async sendOTP() {},
+        async sendOTP() { },
       },
     }),
     // organisation plugin — each organisation represents a school.
@@ -66,8 +94,8 @@ export const auth = betterAuth({
     organization({
       disableOrganizationDeletion: true,
       membershipLimit: 100,
-      cancelPendingInvitationsOnReInvite: true,
-      requireEmailVerificationOnInvitation: true,
+      // cancelPendingInvitationsOnReInvite: true,
+      // requireEmailVerificationOnInvitation: true,
     }),
 
     // Admin plugin for user management and impersonation

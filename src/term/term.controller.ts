@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Body, HttpCode, Param, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, HttpCode, Param, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { TermService } from './term.service';
 import { CreateTermDto, UpdateTermDto, PatchTermParamsDto } from './dto/term.dto';
@@ -40,5 +40,17 @@ export class TermController {
     @Body() data: UpdateTermDto,
   ) {
     return this.termService.updateTerm(session.user.id, params.id, data);
+  }
+
+  // Delete a term. Fails with 400 while grading, assessment structure,
+  // class assignments, enrollments, or export requests still reference it (FK RESTRICT).
+  @Delete(':id')
+  @UseGuards(OrgAdminGuard)
+  @HttpCode(200)
+  async deleteTerm(
+    @Session() session: UserSession,
+    @Param() params: PatchTermParamsDto,
+  ) {
+    return this.termService.deleteTerm(session.user.id, params.id);
   }
 }

@@ -38,7 +38,7 @@ export class GradingEntryDto {
 export class SaveGradingSystemDto {
   @IsArray()
   @ArrayMinSize(1, { message: 'At least one grade entry is required' })
-  @ArrayMaxSize(20, { message: 'Maximum 10 grade entries allowed' })
+  @ArrayMaxSize(20, { message: 'Maximum 20 grade entries allowed' })
   @ValidateNested({ each: true })
   @Type(() => GradingEntryDto)
   entries!: GradingEntryDto[];

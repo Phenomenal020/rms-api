@@ -18,12 +18,12 @@ import { GradingSystemModule } from './grading_system/grading-system.module';
 import configuration from './config/configuration';
 import { StudentViewModule } from './student-view/student-view.module';
 import { SubjectViewModule } from './subject-view/subject-view.module';
-import { TeacherInvitationModule } from './teacher-invitation/teacher-invitation.module';
 import { OrganisationModule } from './organisation/organisation.module';
 import { RecordModule } from './record/record.module';
 import { AuthGuardsModule } from './auth/auth-guards.module';
 import { requestId } from './middlewares/request-id.middleware';
 import { requestLogger } from './middlewares/request-logger.middleware';
+import { OnboardingModule } from './onboarding/onboarding.module';
 
 // @Global() // make the module global (available to all modules). Think helpers, db connections, etc.
 @Module({
@@ -48,7 +48,6 @@ import { requestLogger } from './middlewares/request-logger.middleware';
     // Static modules: Can be imported at compile time
     UsersModule,
     OrganisationModule,
-    TeacherInvitationModule,
     TermModule,
     AssessmentStructureModule,
     GradingSystemModule,
@@ -58,13 +57,14 @@ import { requestLogger } from './middlewares/request-logger.middleware';
     StudentViewModule,
     SubjectViewModule,
     RecordModule,
+    OnboardingModule,
   ],
 
-  // controllers: [AppController],  // Controller registration
-  providers: [{
-    provide: APP_GUARD,
-    useClass: AuthGuard,
-  }],  // Provider registration
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: AuthGuard,
+    }],  // Provider registration
   // exports: [] 
 })
 

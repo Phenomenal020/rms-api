@@ -8,6 +8,20 @@ interface TeacherInvitationEmailData {
   expiryDays?: number;
 }
 
+const BRAND = "#2f4858";
+const PAGE_BG = "#f4f4f1";
+const CARD_BG = "#ffffff";
+const BORDER = "#e4e2dd";
+const RULE = "#eeece8";
+const TEXT = "#1f2328";
+const BODY = "#4a5259";
+const MUTED = "#8b9199";
+const FOOTER = "#6b7280";
+const FAINT = "#9aa0a6";
+
+const SANS =
+  "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
 export async function sendTeacherInvitationEmail({
   to,
   fullName,
@@ -15,73 +29,80 @@ export async function sendTeacherInvitationEmail({
   activationLink,
   expiryDays = 7,
 }: TeacherInvitationEmailData) {
-  const greeting = [title, fullName].filter(Boolean).join(' ') || 'there';
+  const name = [title, fullName].filter(Boolean).join(" ");
+  const greeting = name ? `Hi ${name},` : "Hi there,";
 
   await sendEmail({
     to,
-    subject: "You've been invited to join Teacher's Aid",
+    subject: "You've been invited to Teacher's Aid",
     html: `
-      <!DOCTYPE html>
-      <html lang="en">
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+      <html xmlns="http://www.w3.org/1999/xhtml" lang="en">
       <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="x-apple-disable-message-reformatting" />
+        <meta name="color-scheme" content="light only" />
+        <meta name="supported-color-schemes" content="light only" />
+        <title>You've been invited to Teacher's Aid</title>
+        <!--[if mso]>
+        <style type="text/css">
+          body, table, td, p, h1 { font-family: Arial, Helvetica, sans-serif !important; }
+        </style>
+        <![endif]-->
       </head>
-      <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;background-color:#f4f4f4;line-height:1.6;">
-        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#f4f4f4;padding:40px 20px;">
+      <body style="margin:0;padding:0;background-color:${PAGE_BG};font-family:${SANS};-webkit-font-smoothing:antialiased;color:${TEXT};">
+
+        <div style="display:none;font-size:1px;color:${PAGE_BG};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">Your school invited you to Teacher's Aid. Accept within ${expiryDays} days.</div>
+
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:${PAGE_BG};padding:40px 16px;">
           <tr>
             <td align="center">
-              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="max-width:600px;background-color:#ffffff;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);overflow:hidden;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="520" style="max-width:520px;background-color:${CARD_BG};border-radius:8px;border:1px solid ${BORDER};">
 
-                <!-- Header -->
+                <!-- Wordmark -->
                 <tr>
-                  <td style="padding:40px 40px 30px;text-align:center;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:8px 8px 0 0;">
-                    <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:600;letter-spacing:-0.5px;">You're Invited!</h1>
-                    <p style="margin:10px 0 0;color:rgba(255,255,255,0.85);font-size:15px;">Teacher's Aid — School Management Platform</p>
+                  <td style="padding:36px 40px 0;">
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                      <tr>
+                        <td style="width:26px;height:26px;background-color:${BRAND};border-radius:5px;text-align:center;vertical-align:middle;font-size:13px;font-weight:bold;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">T</td>
+                        <td style="padding-left:9px;font-size:14px;font-weight:500;color:${BRAND};letter-spacing:0.2px;">Teacher's Aid</td>
+                      </tr>
+                    </table>
                   </td>
                 </tr>
 
-                <!-- Content -->
+                <!-- Body -->
                 <tr>
-                  <td style="padding:40px 40px 30px;">
-                    <p style="margin:0 0 16px;color:#4a4a4a;font-size:16px;">Dear ${greeting},</p>
-                    <p style="margin:0 0 24px;color:#4a4a4a;font-size:16px;line-height:1.7;">
-                      You have been invited by your school administrator to join <strong>Teacher's Aid</strong>. 
-                      Click the button below to accept your invitation and create your account.
-                    </p>
+                  <td style="padding:30px 40px 0;">
+                    <h1 style="margin:0 0 16px;font-size:19px;font-weight:500;color:${TEXT};line-height:1.35;">You've been invited to Teacher's Aid</h1>
+                    <p style="margin:0 0 8px;font-size:15px;color:${BODY};line-height:1.6;">${greeting}</p>
+                    <p style="margin:0 0 26px;font-size:15px;color:${BODY};line-height:1.6;">Your school administrator invited you to join Teacher's Aid. Accept below to create your account.</p>
 
-                    <!-- CTA Button -->
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:0 0 28px;">
+                    <!-- CTA -->
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-bottom:14px;">
                       <tr>
-                        <td align="center">
-                          <a href="${activationLink}" style="display:inline-block;padding:14px 36px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;font-size:16px;box-shadow:0 4px 6px rgba(102,126,234,0.3);">Accept Invitation</a>
+                        <td style="background-color:${BRAND};border-radius:6px;">
+                          <a href="${activationLink}" style="display:inline-block;padding:12px 22px;font-size:14px;font-weight:500;color:#ffffff;text-decoration:none;">Accept invitation</a>
                         </td>
                       </tr>
                     </table>
 
-                    <!-- Fallback link -->
-                    <p style="margin:0 0 8px;color:#6b6b6b;font-size:14px;">If the button doesn't work, copy and paste this link into your browser:</p>
-                    <p style="margin:0 0 24px;word-break:break-all;">
-                      <a href="${activationLink}" style="color:#667eea;font-size:13px;text-decoration:none;">${activationLink}</a>
-                    </p>
-
-                    <!-- Security notice -->
-                    <div style="padding:18px;background-color:#f8f9fa;border-left:4px solid #667eea;border-radius:4px;margin:0 0 24px;">
-                      <p style="margin:0;color:#6b6b6b;font-size:14px;line-height:1.6;">
-                        <strong style="color:#1a1a1a;">Security notice:</strong> This invitation link expires in <strong>${expiryDays} days</strong>. 
-                        If you did not expect this invitation, you can safely ignore this email — no account will be created without your action.
-                      </p>
-                    </div>
-
-                    <p style="margin:0;color:#6b6b6b;font-size:14px;line-height:1.6;">Best regards,<br><strong style="color:#1a1a1a;">Teacher's Aid Team</strong></p>
+                    <p style="margin:0 0 30px;font-size:13px;color:${MUTED};line-height:1.6;">This link expires in ${expiryDays} days. If the button doesn't work, paste this into your browser:<br /><a href="${activationLink}" style="color:${FOOTER};text-decoration:underline;word-break:break-all;">${activationLink}</a></p>
                   </td>
                 </tr>
 
                 <!-- Footer -->
                 <tr>
-                  <td style="padding:24px 40px;background-color:#f8f9fa;border-radius:0 0 8px 8px;border-top:1px solid #e9ecef;text-align:center;">
-                    <p style="margin:0 0 6px;color:#6b6b6b;font-size:13px;">Need help? Contact us at <a href="mailto:support@teachersaid.tech" style="color:#667eea;text-decoration:none;">support@teachersaid.tech</a></p>
-                    <p style="margin:0;color:#9b9b9b;font-size:12px;">© ${new Date().getFullYear()} Teacher's Aid. All rights reserved.</p>
+                  <td style="padding:0 40px 32px;">
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-top:1px solid ${RULE};">
+                      <tr>
+                        <td style="padding-top:20px;">
+                          <p style="margin:0 0 12px;font-size:13px;color:${FOOTER};line-height:1.6;">Didn't expect this? You can safely ignore this email — no account will be created.</p>
+                          <p style="margin:0;font-size:12px;color:${FAINT};line-height:1.6;">Teacher's Aid &nbsp;·&nbsp; <a href="https://teachersaid.tech" style="color:${FOOTER};text-decoration:underline;">teachersaid.tech</a> &nbsp;·&nbsp; <a href="mailto:support@teachersaid.tech" style="color:${FOOTER};text-decoration:underline;">support@teachersaid.tech</a></p>
+                        </td>
+                      </tr>
+                    </table>
                   </td>
                 </tr>
 
@@ -92,6 +113,18 @@ export async function sendTeacherInvitationEmail({
       </body>
       </html>
     `,
-    text: `Dear ${greeting},\n\nYou have been invited by your school administrator to join Teacher's Aid.\n\nAccept your invitation here:\n${activationLink}\n\nThis link expires in ${expiryDays} days. If you did not expect this invitation, you can safely ignore this email.\n\nBest regards,\nTeacher's Aid Team`,
+    text: [
+      greeting,
+      "",
+      "Your school administrator invited you to join Teacher's Aid. Accept below to create your account.",
+      "",
+      activationLink,
+      "",
+      `This link expires in ${expiryDays} days.`,
+      "",
+      "Didn't expect this? You can safely ignore this email — no account will be created.",
+      "",
+      "Teacher's Aid · teachersaid.tech · support@teachersaid.tech",
+    ].join("\n"),
   });
 }

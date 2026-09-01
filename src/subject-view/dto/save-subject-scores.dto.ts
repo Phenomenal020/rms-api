@@ -1,14 +1,11 @@
-// DTO for saving subject assessment scores (multiple students for one subject)
-// Inferred from the client payload structure
-
-import { IsUUID, IsNumber, Min, Max, IsArray, ArrayMinSize, ValidateNested } from 'class-validator';
+import { IsUUID, IsInt, Min, Max, IsArray, ValidateNested, ArrayMaxSize } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class ScoreDto {
   @IsUUID()
   assessmentStructureId!: string;
 
-  @IsNumber()
+  @IsInt()
   @Min(0)
   @Max(100)
   score!: number;
@@ -19,7 +16,7 @@ export class StudentDataDto {
   studentId!: string;
 
   @IsArray()
-  @ArrayMinSize(1)
+  @ArrayMaxSize(10)
   @ValidateNested({ each: true })
   @Type(() => ScoreDto)
   scores!: ScoreDto[];
@@ -33,7 +30,7 @@ export class SaveSubjectScoresDto {
   academicTermId!: string;
 
   @IsArray()
-  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => StudentDataDto)
   studentsData!: StudentDataDto[];
