@@ -384,7 +384,7 @@ export class OnboardingService {
             });
         }
 
-        // Local status updates only (update request + user onboarding status)
+        // Local status updates (request + user onboarding status + active org on all teacher sessions)
         await this.db.transaction(async (tx) => {
             // Mark the join request approved
             await tx.update(teacherJoinRequest).set({
@@ -396,6 +396,13 @@ export class OnboardingService {
             await tx.update(user).set({
                 onboardingStatus: 'APPROVED',
             }).where(eq(user.id, request.userId));
+
+            // Make this school the teacher's active organisation on all of their sessions.
+            // Do not call auth.api.setActiveOrganization here — that API uses the caller's
+            // session cookies (org admin), not the applicant's.
+            await tx.update(session).set({
+                activeOrganizationId: organisationId,
+            }).where(eq(session.userId, request.userId));
         });
 
         return ok(null);

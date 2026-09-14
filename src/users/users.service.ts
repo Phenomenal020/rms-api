@@ -17,6 +17,7 @@ export class UsersService {
     private readonly db: NodePgDatabase<typeof schema>,  // with drizzle client
   ) { }
 
+  // Update user profile. This is used to update the user's first name, last name and name.
   async updateProfile(userId: string, updateData: UpdateProfileDto) {
     return runWithDbContext('user', 'Failed to update user profile', async () => {
       const [updatedUser] = await this.db
@@ -35,8 +36,9 @@ export class UsersService {
     });
   }
 
+  // Get user data by userId. Includes the rejection reason of the user's latest onboarding or join request if the user has one. This is used to display the rejection reason in the UI if rejected or simply redirect to the signin/dashboard pages if not rejected.
   async getUser(userId: string) {
-    return runWithDbContext('user', 'Failed to fetch user', async () => {
+    return runWithDbContext('user', 'Failed to get user information', async () => {
       const tx = await this.db.transaction(async (tx) => {
         // fetch the user data using the userId. Include the rejection reason of the user's latest omboarding or join request if the user has one.
         const [userData] = await tx

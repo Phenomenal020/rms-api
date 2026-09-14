@@ -28,11 +28,15 @@ export class OrganisationService {
         return row?.count ?? 0;  // Return 0 if no rows are found
     }
 
-    // Get the dashboard cards
+    // Get the dashboard cards: Number of enrolled students, number of subjects offered, number of pending requests and number of approved requests. (Todo: Change these)
     async getDashboard(userId: string) {
         return runWithDbContext('organisation', 'Failed to get dashboard', async () => {
-            // Get the organisation id of the authenticated user
+            // Get the organisation id of the user from the session context
             const organisationId = await requireOrganizationId(this.db, userId);
+            // If the organisation id is not found, throw an error.
+            if (!organisationId) {
+                throw new NotFoundException('No organisation found for this user. If you believe this is an error, please contact support.');
+            }
             // Use a promise to resolve the row counts for the dashboard cards
             const [
                 enrolledStudents,
@@ -71,9 +75,13 @@ export class OrganisationService {
     // Add a member to an organisation
     // The DTO carries an email; resolve it to a userId before calling BA's addMember (it requires a userId)
     async addMember(userId: string, payload: AddMemberDto) {
-        return runWithDbContext('organisation', 'Failed to add member to organisation', async () => {
+        return runWithDbContext('organisation', 'Failed to add this member to your organisation', async () => {
             // First, check the org admin belongs to an organisation
             const organisationId = await requireOrganizationId(this.db, userId);
+            // If the organisation id is not found, throw an error.
+            if (!organisationId) {
+                throw new NotFoundException('No organisation found for this user. If you believe this is an error, please contact support or try again.');
+            }
             // Look up the target user by email
             const [targetUser] = await this.db
                 .select({ id: user.id })
@@ -94,7 +102,7 @@ export class OrganisationService {
             });
             // If the result is not found, throw an error.
             if (!data) {
-                throw new BadRequestException('Failed to add member to organisation. Please check the email and try again.');
+                throw new BadRequestException('Failed to add this member to your organisation. Please check the email and try again.');
             }
             // Return success if the member is added to the organisation
             return ok(null);

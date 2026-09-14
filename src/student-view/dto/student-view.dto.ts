@@ -1,46 +1,5 @@
-// DTO for saving student assessment scores
-// Inferred from the client payload structure
+import { IsUUID, IsNotEmpty, IsString } from 'class-validator';
 
-import { IsUUID, IsInt, Min, Max, IsArray, ValidateNested, IsOptional, IsString, IsNotEmpty, ArrayMaxSize, MaxLength } from 'class-validator';
-import { Type } from 'class-transformer';
-
-export class ScoreDto {
-  @IsUUID()
-  assessmentStructureId!: string;
-
-  @IsInt()
-  @Min(0)
-  @Max(100)
-  score!: number;
-}
-
-export class SubjectScoresDto {
-  @IsUUID()
-  subjectId!: string;
-
-  @IsArray()
-  @ArrayMaxSize(10)
-  @ValidateNested({ each: true })
-  @Type(() => ScoreDto)
-  scores!: ScoreDto[];
-}
-
-export class SaveStudentScoresDto {
-  @IsUUID()
-  studentId!: string;
-
-  @IsUUID()
-  academicTermId!: string;
-
-  @IsArray()
-  @ArrayMaxSize(30)
-  @ValidateNested({ each: true })
-  @Type(() => SubjectScoresDto)
-  studentSubjects!: SubjectScoresDto[];
-}
-
-
-// DTO for saving class record export (snapshot is built server-side via getClassRecord)
 export class GetTeacherClassesQueryDto {
   @IsString()
   @IsNotEmpty({ message: "No term information provided. Please try again or contact your school's admin." })
@@ -59,20 +18,6 @@ export class GetClassRecordQueryDto {
   @IsUUID()
   termId!: string;
 }
-
-export class SaveClassRecordExportDto {
-  @IsUUID()
-  classId!: string;
-
-  @IsUUID()
-  academicTermId!: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(2000, { message: 'Comment must be at most 2000 characters' })
-  comment?: string;
-}
-
 
 // ---------------- Response DTOs ----------------
 // Returned from getClassRecord

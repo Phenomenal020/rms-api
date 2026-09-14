@@ -1,24 +1,21 @@
 import { IsString, IsOptional, IsArray, MinLength, IsNotEmpty, IsUUID, MaxLength, ArrayMaxSize, ArrayUnique } from 'class-validator';
 import { Transform } from 'class-transformer';
-
+// Helper function to trim strings
 function trim({ value }: { value: unknown }) {
   if (typeof value !== 'string') return value;
   return value.trim();
 }
 
-
 // -----------------------  Get Classes -----------------------
-// termId is required to get classes for a specific term.
+// termId is required to get classes for a specific term. If not provided, all classes for the organisation are returned.
 export class GetClassesQueryDto {
   @IsOptional()
   @IsUUID()
-  termId?: string;
+  termId?: string | null;  // string or null or undefined
 }
 
-
-
 // ----------------------- Create Class -----------------------
-// activeTermId is required only when assigning subjects.
+// No term information required. We are creating an organisation-scoped class
 export class CreateClassDto {
   @Transform(trim)
   @IsString()
@@ -30,18 +27,18 @@ export class CreateClassDto {
   @IsString()
   @MinLength(1, { message: 'Form teacher must not be blank' })
   formTeacherId?: string | null;
-
-  @IsOptional()
-  @IsUUID()
-  activeTermId?: string | null;
-
-  @IsOptional()
-  @IsArray()
-  @ArrayMaxSize(20, { message: 'Maximum of 20 subjects can be assigned to a class' })
-  @ArrayUnique({ message: 'Subjects must be unique' })
-  @IsUUID(undefined, { each: true })
-  subjectIds?: string[];
 }
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -60,20 +57,16 @@ export class UpdateClassDto {
   @IsString()
   @MinLength(1, { message: 'Form teacher must not be blank' })
   formTeacherId?: string | null;
-
-  @IsOptional()
-  @IsUUID()
-  activeTermId?: string | null;
-
-  @IsOptional()
-  @IsArray()
-  @ArrayMaxSize(20, { message: 'Maximum of 20 subjects can be assigned to a class' })
-  @ArrayUnique({ message: 'Subjects must be unique' })
-  @IsUUID(undefined, { each: true })
-  subjectIds?: string[];
 }
 
 export class PatchClassParamsDto {
+  @IsString()
+  @IsNotEmpty()
+  @IsUUID()
+  id!: string;  // class id
+}
+
+export class DeleteClassParamsDto {
   @IsString()
   @IsNotEmpty()
   @IsUUID()
@@ -84,9 +77,31 @@ export class PatchClassParamsDto {
 
 // ----------------------- Get Class Enrollments -----------------------
 
-export class GetClassEnrollmentsQueryDto {
+export class GetClassSubjectAssignmentsQueryDto {
   @IsString()
   @IsNotEmpty()
   @IsUUID()
   termId!: string;
+}
+
+// Get a class detail by term id
+export class GetClassByIdQueryDto {
+  @IsString()
+  @IsNotEmpty()
+  @IsUUID()
+  termId!: string;
+}
+
+// Save one subject-class assignment for a class (single subject + teacher per request).
+export class SaveSubjectClassAssignmentDto {
+  @IsUUID()
+  activeTermId!: string;
+
+  @IsUUID()
+  subjectId!: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1, { message: 'Assigned teacher must not be blank' })
+  assignedTeacherId?: string | null;
 }

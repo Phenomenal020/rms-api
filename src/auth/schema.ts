@@ -273,7 +273,7 @@ export const organisationClass = pgTable(
   (table) => [
     uniqueIndex("organisationClass_organizationId_name_ci_key").on(
       table.organizationId,
-      sql`lower(${table.name})`,
+      sql`lower(${table.name})`,  // case insensitivity
     ), // one class per organisation/school (case-insensitive)
     index("organisationClass_organizationId_idx").on(table.organizationId),
     index("organisationClass_formTeacherId_idx").on(table.formTeacherId),
@@ -323,6 +323,7 @@ export const student = pgTable(
     classId: varchar("class_id", { length: 128 }).references(() => organisationClass.id, { onDelete: "restrict" }),
     // append-only JSON audit log — each entry records a class the student was previously assigned to
     classHistory: json("class_history"),
+    imageUrl: text("image_url"),
     // organisation (school) affiliation (1-1 mapping)
     organizationId: varchar("organization_id", { length: 128 }).notNull().references(() => organization.id, { onDelete: "restrict" }),
     // audit
@@ -345,7 +346,7 @@ export const student = pgTable(
 
 
 // ***********************************************************************************
-// LEVEL 3: TERM-SCOPED TABLES (across classes)
+// LEVEL 3: TERM-SCOPED TABLES (across classes for a single term)
 // An academic term represents a specific term (FIRST / SECOND / THIRD) for a school in a given academic year.
 export const academicTerm = pgTable(
   "academic_term",
@@ -355,13 +356,12 @@ export const academicTerm = pgTable(
     // academic year and term (immutable)
     academicYear: varchar("academic_year", { length: 16 }).notNull(), // immutable
     term: termEnum("term").notNull(),              // immutable
-    // term days, start and end dates (mutable)
-    termDays: integer("term_days"),
-    termStart: timestamp("term_start"),
-    termEnd: timestamp("term_end"),
+    termDays: integer("term_days"), // optional
+    termStart: timestamp("term_start").notNull(),  // immutable
+    termEnd: timestamp("term_end").notNull(),  // immutable
     // Auditing
     status: academicTermStatusEnum("status").default("DRAFT").notNull(), // score locking
-    templateSchema: json("template_schema"), // template schema for report cards (pro users)
+    templateSchema: json("template_schema"), // template schema for report cards or templateUrl... Not sure for now
     templateUrl: text("template_url"), // URL to the generated template file (pro users)
     // organisation (school) affiliation (1-1 mapping)
     organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
@@ -446,7 +446,7 @@ export const assessmentStructure = pgTable(
 // ***********************************************************************************
 // LEVEL 4: CLASS-IN-TERM SCOPED TABLES (within a class)
 // Each term, a class has many subjects (may change from term to term).
-// Junction table between organisationClass and subject.
+// Junction table between organisationClass and subject. Eg, First term Mathematics for JS1a, First term Mathematics for JS1b, etc.
 export const subjectClassAssignment = pgTable(
   "subject_class_assignment",
   {
@@ -460,6 +460,11 @@ export const subjectClassAssignment = pgTable(
     subjectId: text("subject_id").notNull().references(() => subject.id, { onDelete: "restrict" }),
     // organisation affiliation (1-1 mapping)
     organizationId: text("organization_id").notNull().references(() => organization.id, { onDelete: "restrict" }),
+    // assigned teacher for this subject-class assignment
+    assignedTeacherId: text("assigned_teacher_id").references(() => user.id, { onDelete: "set null" }),
+    // score edit lock — form teacher controls when assigned teachers may edit
+    // locked: boolean("locked").notNull().default(true),
+    lockExpiresAt: timestamp("lock_expires_at").notNull().default(sql`now() - interval '50 years'`),
     // audit
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => /* @__PURE__ */ new Date()),
@@ -470,6 +475,7 @@ export const subjectClassAssignment = pgTable(
     index("subjectClassAssignment_subjectId_idx").on(table.subjectId),
     index("subjectClassAssignment_organizationId_idx").on(table.organizationId),
     index("subjectClassAssignment_academicTermId_idx").on(table.academicTermId),
+    index("subjectClassAssignment_assignedTeacherId_idx").on(table.assignedTeacherId),
   ],
 );
 

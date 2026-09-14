@@ -1,6 +1,6 @@
 import {BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException} from '@nestjs/common';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import * as schema from './schema';
 import { academicTerm, member, organisationClass, student } from './schema';
 import { ROLE_USER } from './roles';
@@ -12,9 +12,23 @@ const TERM_NOT_FOUND_MESSAGE = 'Academic term not found or does not belong to yo
 
 const ACTIVE_TERM_NOT_FOUND_MESSAGE = 'Academic term not found or not active.';
 
+const TERM_NOT_CONFIGURABLE_MESSAGE =
+  'This operation is only allowed for draft or active terms';
+
+export type AcademicTermStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+
 export type RequireTermOptions = {
   requireActive?: boolean;
+  allowedStatuses?: AcademicTermStatus[];
   notFoundMessage?: string;
+};
+
+/** Term statuses that allow grading/assessment-structure configuration writes. */
+export const TERM_CONFIGURABLE_STATUSES: AcademicTermStatus[] = ['DRAFT', 'ACTIVE'];
+
+export const REQUIRE_TERM_CONFIGURABLE: RequireTermOptions = {
+  allowedStatuses: TERM_CONFIGURABLE_STATUSES,
+  notFoundMessage: TERM_NOT_CONFIGURABLE_MESSAGE,
 };
 
 // Require the organisation id for the user
@@ -79,9 +93,11 @@ export async function requireTermInOrganization(
     eq(academicTerm.id, termId),
     eq(academicTerm.organizationId, orgId),
   ];
-  if (options?.requireActive) {
+  if (options?.allowedStatuses?.length) {
+    conditions.push(inArray(academicTerm.status, options.allowedStatuses));
+  } else if (options?.requireActive) {
     conditions.push(eq(academicTerm.status, 'ACTIVE'));
-  }   // active term is not required when fetching classes regardless of the term in question
+  }
   // Execute the query and return the term id
   const [term] = await db
     .select({ id: academicTerm.id })
@@ -93,9 +109,11 @@ export async function requireTermInOrganization(
   if (!term) {
     throw new NotFoundException(
       options?.notFoundMessage ??
-        (options?.requireActive
-          ? ACTIVE_TERM_NOT_FOUND_MESSAGE
-          : TERM_NOT_FOUND_MESSAGE),
+        (options?.allowedStatuses?.length
+          ? TERM_NOT_CONFIGURABLE_MESSAGE
+          : options?.requireActive
+            ? ACTIVE_TERM_NOT_FOUND_MESSAGE
+            : TERM_NOT_FOUND_MESSAGE),
     );
   }
   return orgId;
@@ -151,18 +169,18 @@ export async function requireStudentInOrganization(
   return row;
 }
 
-// Form teacher must be an org member with the teacher role (not org admin).
+// Teacher must be an org member with the teacher role (not org admin).
 export async function requireFormTeacherMember(
   db: NodePgDatabase<typeof schema>,
   organisationId: string,
-  formTeacherUserId: string,
+  teacherUserId: string,
 ): Promise<void> {
   const [row] = await db
     .select({ role: member.role })
     .from(member)
     .where(
       and(
-        eq(member.userId, formTeacherUserId),
+        eq(member.userId, teacherUserId),
         eq(member.organizationId, organisationId),
       ),
     )
@@ -170,12 +188,12 @@ export async function requireFormTeacherMember(
 
   if (!row) {
     throw new BadRequestException(
-      'The form teacher you selected does not exist or is not a member of your school',
+      'The teacher you selected does not exist or is not a member of your school',
     );
   }
-  if (row.role !== ROLE_USER) {
-    throw new BadRequestException(
-      'Only teachers can be assigned as form teacher',
-    );
-  }
+  // if (row.role !== ROLE_USER) {
+  //   throw new BadRequestException(
+  //     'Only teachers can be assigned as form teachers or subject teachers',
+  //   );
+  // }
 }

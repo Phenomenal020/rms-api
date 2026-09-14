@@ -1,3 +1,9 @@
+/** Minimal teacher reference for class detail views. */
+export class TeacherRefDto {
+  id!: string;
+  name!: string;
+}
+
 /** Form teacher embedded on a class list item. */
 export class FormTeacherDto {
   id!: string;
@@ -28,6 +34,22 @@ export class SubjectAssignmentDto {
   assignmentId!: string;
   subjectId!: string;
   subjectName!: string;
+}
+
+/** Subject-class assignment with assigned teacher on GET /classes/:id. */
+export class ClassSubjectAssignmentDto {
+  assignmentId!: string;
+  subjectId!: string;
+  subjectName!: string;
+  assignedTeacher!: TeacherRefDto | null;
+}
+
+/** GET /classes/:id */
+export class ClassDetailDto {
+  id!: string;
+  name!: string;
+  formTeacher!: TeacherRefDto | null;
+  subjectAssignments!: ClassSubjectAssignmentDto[];
 }
 
 /** One row in GET /classes/enrollments. */

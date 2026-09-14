@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsEnum, IsOptional, IsInt, Min, MinLength, IsISO8601, IsUUID, IsIn, MaxLength } from 'class-validator';
+import { IsString, IsNotEmpty, IsEnum, IsOptional, IsInt, Min, MinLength, IsISO8601, IsUUID, IsIn, MaxLength, Matches, ValidateBy } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 function trim({ value }: { value: unknown }) {
@@ -13,6 +13,25 @@ export class CreateTermDto {
     @Transform(trim)
     @MinLength(1, { message: 'Academic year must not be blank' })
     @MaxLength(16, { message: 'Academic year must be at most 16 characters' })
+    @Matches(/^\d{4}\/\d{4}$/, { message: 'Academic year must be in the format 2024/2025' })
+    @ValidateBy({
+        name: 'isConsecutiveAcademicYear',
+        validator: {
+            validate(value: unknown) {
+                // Check if the value is a string. Retuurn false otherwise.
+                if (typeof value !== 'string') return false;
+                // Check if the value is in the format 2024/2025. Return false otherwise.
+                const match = /^(\d{4})\/(\d{4})$/.exec(value);
+                if (!match) return false;
+                // Check if the end year is one year after the start year. Return false otherwise.
+                return Number(match[2]) === Number(match[1]) + 1;
+            },
+            // Return the default message if the validation fails.
+            defaultMessage() {
+                return 'Academic year end must be one year after the start (e.g. 2024/2025)';
+            },
+        },
+    })
     academicYear!: string;
 
     @IsEnum(['FIRST', 'SECOND', 'THIRD'])
@@ -26,49 +45,36 @@ export class CreateTermDto {
     // @IsISO8601 validates the format before the service parses it with new Date().
     // Without this, "not-a-date" passes the DTO and produces Invalid Date in the service,
     // resulting in a raw Postgres type error instead of a clean 400.
-    @IsOptional()
+    @IsNotEmpty()
+    @Transform(trim)
     @IsString()
-    @IsISO8601({}, { message: 'termStart must be a valid date ' })
-    termStart?: string;
+    @IsISO8601({ strict: true }, { message: 'termStart must be a valid date ' })
+    termStart!: string;
 
-    @IsOptional()
+    @IsNotEmpty()
+    @Transform(trim)
     @IsString()
-    @IsISO8601({}, { message: 'termEnd must be a valid date string' })
-    termEnd?: string;
+    @IsISO8601({ strict: true }, { message: 'termEnd must be a valid date string' })
+    termEnd!: string;
 }
 
-
-
 export class UpdateTermDto {
-    // Only mutable fields: academicYear and term (enum) are immutable identifiers, so they are not included.
-
+    // Only mutable fields are included.
     // Term days
     @IsOptional()
     @IsInt()
     @Min(1)
     termDays?: number;
 
-    // @IsISO8601 validates the format before the service parses it with new Date().
-    // Without this, "not-a-date" passes the DTO and produces Invalid Date in the service,
-    // resulting in a raw Postgres type error instead of a clean 400.
-    @IsOptional()
-    @IsString()
-    @IsISO8601({}, { message: 'termStart must be a valid ISO 8601 date string' })
-    termStart?: string;
-
-    @IsOptional()
-    @IsString()
-    @IsISO8601({}, { message: 'termEnd must be a valid ISO 8601 date string' })
-    termEnd?: string;
-
+    // Term status
     @IsOptional()
     @IsIn(['DRAFT', 'ACTIVE', 'ARCHIVED'])
     status?: 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
 }
 
 export class PatchTermParamsDto {
-  @IsString()
-  @IsNotEmpty()
-  @IsUUID()
-  id!: string;
+    @IsString()
+    @IsNotEmpty()
+    @IsUUID()
+    id!: string;
 }

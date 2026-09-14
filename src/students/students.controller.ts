@@ -69,4 +69,6 @@ export class StudentsController {
   ) {
     return this.studentsService.saveEnrollment(session.user.id, data);
   }
+
+  // Todo: Add a route to update imageUrl for a student
 }

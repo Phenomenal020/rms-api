@@ -1,9 +1,9 @@
-import { Injectable, BadRequestException, Inject, ConflictException } from '@nestjs/common';
+import { Injectable, BadRequestException, Inject, ConflictException, NotFoundException } from '@nestjs/common';
 import { runWithDbContext } from '../common/filters/run-with-db-context';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { DATABASE_CONNECTION } from '../database/database-connection.token';
 import { assessmentStructure } from '../auth/schema';
-import { requireTermInOrganization } from '../auth/org-context.helper';
+import { requireTermInOrganization, REQUIRE_TERM_CONFIGURABLE } from '../auth/org-context.helper';
 import { eq, and, inArray } from 'drizzle-orm';
 import { validateAssessmentEntries } from './assessment-structure.validation';
 import { CreateAssessmentStructureDto, UpdateAssessmentStructureDto, UpdateAssessmentEntryDto, CreateAssessmentEntryDto } from './dto/assessment-structure.dto';
@@ -24,7 +24,7 @@ export class AssessmentStructureService {
       'assessment_structure',
       'Failed to fetch assessment structure. Please try again later.',
       async () => {
-        // Assert that the user is the owner of the term
+        // Get the user's organisation. Also account for the term belonging to that organisation and in either draft or active status mode.
         const organisationId = await requireTermInOrganization(this.db, userId, termId);
         // Then, fetch the assessment structure for the term
         const rows = await this.db
@@ -45,14 +45,23 @@ export class AssessmentStructureService {
 
   // Create assessment structure for a term. POST /assessment-structure
   async createAssessmentStructure(userId: string, payload: CreateAssessmentStructureDto) {
-    // Business logic validation
+    // Custom business logic validation
     const validation = validateAssessmentEntries(payload.entries);
     if (!validation.isValid) {
       throw new BadRequestException(validation.error);
     }
-    // Assert that the user is the owner of the term
-    const organisationId = await requireTermInOrganization(this.db, userId, payload.termId);
-    // Then, create the assessment structure for the term
+    // Get the user's organisation. Also account for the term belonging to that organisation and in either draft or active status mode.
+    const organisationId = await requireTermInOrganization(
+      this.db,
+      userId,
+      payload.termId,
+      REQUIRE_TERM_CONFIGURABLE,
+    );
+    // If the organisation id is not found, throw an error.
+    if (!organisationId) {
+      throw new NotFoundException('No organisation found for this user. If you believe this is an error, please contact support or try again.');
+    }
+    // Create the assessment structure for the term
     return runWithDbContext(
       'assessment_structure',
       'Failed to create assessment structure. Please try again later.',
@@ -80,7 +89,7 @@ export class AssessmentStructureService {
             })),
           );
         });
-
+        // Return a success response
         return ok(null);
       },
     );
@@ -88,15 +97,23 @@ export class AssessmentStructureService {
 
   // Update assessment structure for a term. PATCH /assessment-structure/{termId}
   async updateAssessmentStructure(userId: string, termId: string, payload: UpdateAssessmentStructureDto) {
-    // Business logic validation
+    // Custom business logic validation
     const validation = validateAssessmentEntries(payload.entries);
     if (!validation.isValid) {
       throw new BadRequestException(validation.error);
     }
-
-    // Assert that the user is the owner of the term
-    const organisationId = await requireTermInOrganization(this.db, userId, termId);
-
+    // Get the user's organisation. Also account for the term belonging to that organisation and in either draft or active status mode.
+    // Assert that the user is the owner of the term (draft or active only)
+    const organisationId = await requireTermInOrganization(
+      this.db,
+      userId,
+      termId,
+      REQUIRE_TERM_CONFIGURABLE,
+    );
+    // If the organisation id is not found, throw an error.
+    if (!organisationId) {
+      throw new NotFoundException('No organisation found for this user. If you believe this is an error, please contact support or try again.');
+    }
     // Fetch existing structures for this term (needed for the diff)
     const dbStructures = await this.db
       .select()
@@ -146,6 +163,7 @@ export class AssessmentStructureService {
       'Failed to update assessment structure. Please try again later.',
       async () => {
         await this.db.transaction(async (tx) => {
+          // If there are entries to delete, delete them
           if (toDeleteIds.length > 0) {
             await tx
               .delete(assessmentStructure)
@@ -156,7 +174,7 @@ export class AssessmentStructureService {
                 ),
               );
           }
-
+          // If there are entries to update, update them
           for (const entry of toUpdate) {
             await tx
               .update(assessmentStructure)
@@ -174,6 +192,7 @@ export class AssessmentStructureService {
               );
           }
 
+          // If there are entries to insert, insert them
           if (toInsert.length > 0) {
             await tx.insert(assessmentStructure).values(
               toInsert.map(entry => ({
@@ -186,7 +205,7 @@ export class AssessmentStructureService {
             );
           }
         });
-
+        // Return a success response
         return ok(null);
       },
     );

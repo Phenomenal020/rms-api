@@ -1,5 +1,4 @@
 // Resources: https://docs.nestjs.com/modules
-
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { DatabaseModule } from './database/database.module';
 import { AuthGuard, AuthModule } from '@thallesp/nestjs-better-auth';
@@ -29,7 +28,7 @@ import { OnboardingModule } from './onboarding/onboarding.module';
 @Module({
 
   imports: [
-    // Dynamic modules: Requires runtime configs/dependencies 
+    // Dynamic modules: Requires runtime configs/dependencies
     // ConfigModule to manage environment variables
     ConfigModule.forRoot({
       load: [configuration],
@@ -59,7 +58,6 @@ import { OnboardingModule } from './onboarding/onboarding.module';
     RecordModule,
     OnboardingModule,
   ],
-
   providers: [
     {
       provide: APP_GUARD,

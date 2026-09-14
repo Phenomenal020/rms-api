@@ -129,7 +129,9 @@ export class StudentsService {
   // FK RESTRICT on student_subject_enrollment blocks delete while enrollments exist
   // (mapped to a clear 400 via runWithDbContext + postgres-error.mapper).
   async deleteStudent(userId: string, studentId: string) {
+    // Get the user's organisation id from the session context
     const organisationId = await requireOrganizationId(this.db, userId);
+    // Delete the student. The where clause ensures that the student belongs to the user's organisation.
     return runWithDbContext('student', 'Failed to delete student', async () => {
       const [deleted] = await this.db
         .delete(student)

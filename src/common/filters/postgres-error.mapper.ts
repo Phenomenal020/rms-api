@@ -11,7 +11,9 @@ export type PgErrorContext =
   | 'organisation'
   | 'user'
   | 'onboarding'
-  | 'generic';
+  | 'generic'
+  | 'subject-view'
+  | 'student-view';
 
 export function mapPostgresError(
   error: unknown,
@@ -119,6 +121,10 @@ export function mapPostgresError(
           );
         }
         return new ConflictException('Onboarding request conflict');
+      case 'subject-view':
+        return new ConflictException('Subject assignment conflict');
+      case 'student-view':
+        return new ConflictException('Student view conflict');
       default:
         return new ConflictException('Resource already exists');
     }
@@ -205,6 +211,14 @@ export function mapPostgresError(
       case 'user':
         return new BadRequestException(
           'Cannot complete this user operation because related records still exist.',
+        );
+      case 'subject-view':
+        return new BadRequestException(
+          'Cannot complete this subject assignment operation because related records still exist.',
+        );
+      case 'student-view':
+        return new BadRequestException(
+          'Cannot complete this student view operation because related records still exist.',
         );
       default:
         return new BadRequestException(

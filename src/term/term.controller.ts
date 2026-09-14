@@ -19,6 +19,14 @@ export class TermController {
     return this.termService.getTerms(session.user.id);
   }
 
+  // Get the active term id for the authenticated user's school
+  @Get('active')
+  @UseGuards(OrgMemberGuard)
+  @HttpCode(200)
+  async getActiveTerm(@Session() session: UserSession) {
+    return this.termService.getActiveTerm(session.user.id);
+  }
+
   // Create a new academic term
   @Post()
   @UseGuards(OrgAdminGuard)
@@ -53,4 +61,7 @@ export class TermController {
   ) {
     return this.termService.deleteTerm(session.user.id, params.id);
   }
+
+  // Todo: Add a route for ONLY the platform admin to update term start and end dates.
+  // Also make term status active to be automatic
 }

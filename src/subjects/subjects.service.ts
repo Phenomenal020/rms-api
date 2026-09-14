@@ -47,7 +47,7 @@ export class SubjectsService {
 
   // Create a new subject linked to the authenticated user's school.
   async createSubject(userId: string, data: CreateSubjectDto) {
-    // DTO + global ValidationPipe handles validation and transformation (trim, IsIn, etc.)
+    // DTO + global ValidationPipe handles validation and transformation. No custom validation is needed.
     // Get the organisation id for the authenticated user
     const organisationId = await requireOrganizationId(this.db, userId);
     // Use that to create the new subject
@@ -76,7 +76,6 @@ export class SubjectsService {
     if (data.department !== undefined) {
       subjectUpdateData.department = data.department ?? null;
     }
-
     // Single UPDATE — no extra round trip needed.
     // The WHERE clause checks both subject.id and subject.organizationId, so ownership is
     // enforced implicitly: a subject from another school will simply not match.
@@ -97,8 +96,10 @@ export class SubjectsService {
   // FK RESTRICT on subject_class_assignment blocks delete while assignments exist
   // (mapped to a clear 400 via runWithDbContext + postgres-error.mapper).
   async deleteSubject(userId: string, subjectId: string) {
+    // Get the user's organisation id from the session context
     const organisationId = await requireOrganizationId(this.db, userId);
     return runWithDbContext('subject', 'Failed to delete subject', async () => {
+      // Delete the subject. The where clause ensures that the subject belongs to the user's organisation.
       const [deleted] = await this.db
         .delete(subject)
         .where(and(eq(subject.id, subjectId), eq(subject.organizationId, organisationId)))
