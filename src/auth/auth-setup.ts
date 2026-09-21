@@ -16,8 +16,10 @@ import { passwordSchema } from './validation';
 import { z } from 'zod';
 
 import { ac, orgadmin, admin, user } from './permissions';
+import { eq, and } from 'drizzle-orm';
 import { getOrganisationByUserId } from './helpers';
 import * as schema from './schema';
+import { session, teacherJoinRequest, user as userTable } from './schema';
 
 
 // Helpers
@@ -287,11 +289,45 @@ export function createBetterAuth(database: NodePgDatabase, configService: Config
               database as unknown as NodePgDatabase<typeof schema>,
               member.userId ?? user.id,
             );
+            if (user.role === "admin") {
+              throw new APIError("BAD_REQUEST", {
+                message: "This user does not exist or cannot be added to a school",
+              });;
+            }
             if (existingOrg) {
               throw new APIError("BAD_REQUEST", {
                 message: "This user already belongs to a school",
               });
             }
+          },
+          // after remove member: revoke teacher access so they must re-onboard to join a school again.
+          // CANCELLED (not REJECTED) — membership was withdrawn after approval, not a declined join request.
+          afterRemoveMember: async ({ member, user }) => {
+            const memberRoles = member.role.split(",").map((role) => role.trim());
+            if (memberRoles.includes("owner")) {
+              return;
+            }
+
+            await database
+              .update(userTable)
+              .set({ onboardingStatus: "CANCELLED" })
+              .where(eq(userTable.id, user.id));
+
+            await database
+              .update(session)
+              .set({ activeOrganizationId: null })
+              .where(eq(session.userId, user.id));
+
+            await database
+              .update(teacherJoinRequest)
+              .set({ status: "CANCELLED", rejectionReason: null })
+              .where(
+                and(
+                  eq(teacherJoinRequest.userId, user.id),
+                  eq(teacherJoinRequest.organisationId, member.organizationId),
+                  eq(teacherJoinRequest.status, "APPROVED"),
+                ),
+              );
           },
         }
       }),

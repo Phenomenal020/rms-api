@@ -18,7 +18,7 @@ import configuration from './config/configuration';
 import { StudentViewModule } from './student-view/student-view.module';
 import { SubjectViewModule } from './subject-view/subject-view.module';
 import { OrganisationModule } from './organisation/organisation.module';
-import { RecordModule } from './record/record.module';
+// import { RecordModule } from './record/record.module';
 import { AuthGuardsModule } from './auth/auth-guards.module';
 import { requestId } from './middlewares/request-id.middleware';
 import { requestLogger } from './middlewares/request-logger.middleware';
@@ -55,7 +55,7 @@ import { OnboardingModule } from './onboarding/onboarding.module';
     StudentsModule,
     StudentViewModule,
     SubjectViewModule,
-    RecordModule,
+    // RecordModule,
     OnboardingModule,
   ],
   providers: [
