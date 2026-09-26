@@ -1,7 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
-import { HttpStatus, ValidationPipe, VersioningType } from '@nestjs/common';
+import { HttpStatus, Logger, ValidationPipe, VersioningType } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import helmet from 'helmet';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -10,11 +10,16 @@ import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 import { NestExpressApplication } from '@nestjs/platform-express';
 
 async function bootstrap() {
+  const logger = new Logger('Bootstrap');
 
   // Create the Nest application (With express adapter)
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
   });
+
+  // Cloud Run: SIGTERM on scale-in / new revision → close HTTP server, lifecycle hooks, then exit.
+  app.enableShutdownHooks(['SIGTERM', 'SIGINT'], { useProcessExit: true });
+
   app.useBodyParser('json', { limit: '100kb' });
   app.use(helmet());
 
@@ -60,9 +65,8 @@ async function bootstrap() {
     allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
   });
 
-  // app.use(logger); Global middleware
-  
-  // app.use(logger);  - Global middleware
-  await app.listen(configService.get<number>('port') ?? 5000);  // Extra precaution
+  const port = configService.get<number>('port') ?? 5000;
+  await app.listen(port);
+  logger.log(`Listening on port ${port}`);
 }
 bootstrap();
