@@ -1,28 +1,25 @@
 import { createAccessControl } from "better-auth/plugins/access";
-import { defaultStatements, adminAc, userAc } from "better-auth/plugins/admin/access";
+import { defaultStatements, userAc } from "better-auth/plugins/admin/access";
 
-
-// All resources and their allowed actions across the platform (resource name: [actions])
+// Permission vocabulary (admin plugin defaults + org create for school onboarding).
 const statement = {
-    ...defaultStatements,
-    user:         ["get", "update", "create", "list", "set-role", "ban", "impersonate", "impersonate-admins", "delete", "set-password" ],
-    session:      ["list", "revoke", "delete"],
-    organization: ["create"],
+  ...defaultStatements,
+  organization: ["create"],
 } as const;
 
-// create the access controller
 export const ac = createAccessControl(statement);
 
-// admin: full platform access (maps to user.role === "admin")
+// Platform admin — admin dashboard: list users, change role, ban/unban only.
 export const admin = ac.newRole({
-    ...adminAc.statements,
+  user: ["list", "set-role", "ban", "impersonate"],
 });
 
+// Teacher / staff — no Better Auth admin-plugin powers.
 export const user = ac.newRole({
-    ...userAc.statements,
-})
+  ...userAc.statements,
+});
 
-// orgadmin: can create and update their own organisation (maps to user.role === "orgadmin")
+// School admin — create organisation (school) during onboarding.
 export const orgadmin = ac.newRole({
-    organization: ["create"],
+  organization: ["create"],
 });
